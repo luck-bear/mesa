@@ -180,7 +180,7 @@
         "description": "nir/linker: disable varying from uniform lowering by default",
         "nominated": true,
         "nomination_type": 1,
-        "resolution": 0,
+        "resolution": 5,
         "because_sha": "260462504372a0b398af8b41bd790a1a557abec9"
     },
     {
