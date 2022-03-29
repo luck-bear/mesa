@@ -2556,7 +2556,7 @@
         "description": "Revert \"anv: Disable CCS_E for some 8/16bpp copies on TGL+\"",
         "nominated": true,
         "nomination_type": 1,
-        "resolution": 0,
+        "resolution": 5,
         "because_sha": "57445adc89186fcadc1e6006d1aa32768b26556b"
     },
     {
