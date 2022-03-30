@@ -1548,7 +1548,7 @@
         "description": "lavapipe: Don't use VK_OUTARRAY_MAKE()/vk_outarray_append()",
         "nominated": true,
         "nomination_type": 1,
-        "resolution": 0,
+        "resolution": 5,
         "because_sha": "dc8fdab71efdc3e516f2a8abdfdc2dec05fce448"
     },
     {
