@@ -300,7 +300,7 @@
         "description": "radv: Use correct buffer offset for conditional rendering.",
         "nominated": true,
         "nomination_type": 0,
-        "resolution": 0,
+        "resolution": 5,
         "because_sha": null
     },
     {
