@@ -2071,7 +2071,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
           */
          ctx->so->constlen =
             MAX2(ctx->so->constlen,
-                 ctx->so->shader->num_reserved_user_consts +
+                 ctx->so->num_reserved_user_consts +
                  const_state->ubo_state.size / 16);
       }
       break;
@@ -3756,7 +3756,7 @@ static void
 emit_stream_out(struct ir3_context *ctx)
 {
    struct ir3 *ir = ctx->ir;
-   struct ir3_stream_output_info *strmout = &ctx->so->shader->stream_output;
+   struct ir3_stream_output_info *strmout = &ctx->so->stream_output;
    struct ir3_block *orig_end_block, *stream_out_block, *new_end_block;
    struct ir3_instruction *vtxcnt, *maxvtxcnt, *cond;
    struct ir3_instruction *bases[IR3_MAX_SO_BUFFERS];
@@ -3894,7 +3894,7 @@ emit_function(struct ir3_context *ctx, nir_function_impl *impl)
     * out instructions.
     */
    if ((ctx->compiler->gen < 5) &&
-       (ctx->so->shader->stream_output.num_outputs > 0) &&
+       (ctx->so->stream_output.num_outputs > 0) &&
        !ctx->so->binning_pass) {
       debug_assert(ctx->so->type == MESA_SHADER_VERTEX);
       emit_stream_out(ctx);
@@ -4592,6 +4592,7 @@ collect_tex_prefetches(struct ir3_context *ctx, struct ir3 *ir)
 
 int
 ir3_compile_shader_nir(struct ir3_compiler *compiler,
+                       struct ir3_shader *shader,
                        struct ir3_shader_variant *so)
 {
    struct ir3_context *ctx;
@@ -4601,7 +4602,7 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
 
    assert(!so->ir);
 
-   ctx = ir3_context_init(compiler, so);
+   ctx = ir3_context_init(compiler, shader, so);
    if (!ctx) {
       DBG("INIT failed!");
       ret = -1;

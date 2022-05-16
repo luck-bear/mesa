@@ -37,7 +37,7 @@
 
 #include "tu_cs.h"
 
-static uint32_t
+uint32_t
 tu6_plane_count(VkFormat format)
 {
    switch (format) {
@@ -71,10 +71,13 @@ tu6_plane_index(VkFormat format, VkImageAspectFlags aspect_mask)
 {
    switch (aspect_mask) {
    default:
+      assert(aspect_mask != VK_IMAGE_ASPECT_MEMORY_PLANE_3_BIT_EXT);
       return 0;
    case VK_IMAGE_ASPECT_PLANE_1_BIT:
+   case VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT:
       return 1;
    case VK_IMAGE_ASPECT_PLANE_2_BIT:
+   case VK_IMAGE_ASPECT_MEMORY_PLANE_2_BIT_EXT:
       return 2;
    case VK_IMAGE_ASPECT_STENCIL_BIT:
       return format == VK_FORMAT_D32_SFLOAT_S8_UINT;
@@ -173,6 +176,9 @@ tu_image_view_init(struct tu_image_view *iview,
    const struct tu_sampler_ycbcr_conversion *conversion = ycbcr_conversion ?
       tu_sampler_ycbcr_conversion_from_handle(ycbcr_conversion->conversion) : NULL;
 
+   const struct VkImageViewMinLodCreateInfoEXT *min_lod =
+      vk_find_struct_const(pCreateInfo->pNext, IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT);
+
    iview->image = image;
 
    const struct fdl_layout *layouts[3];
@@ -211,6 +217,7 @@ tu_image_view_init(struct tu_image_view *iview,
    args.base_miplevel = range->baseMipLevel;
    args.layer_count = tu_get_layerCount(image, range);
    args.level_count = tu_get_levelCount(image, range);
+   args.min_lod_clamp = min_lod ? min_lod->minLod : 0.f;
    args.format = tu_format_for_aspect(format, aspect_mask);
    vk_component_mapping_to_pipe_swizzle(pCreateInfo->components, args.swiz);
    if (conversion) {
@@ -350,8 +357,7 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
    image->layer_count = pCreateInfo->arrayLayers;
 
    enum a6xx_tile_mode tile_mode = TILE6_3;
-   bool ubwc_enabled =
-      !(device->physical_device->instance->debug_flags & TU_DEBUG_NOUBWC);
+   bool ubwc_enabled = true;
 
    /* use linear tiling if requested */
    if (pCreateInfo->tiling == VK_IMAGE_TILING_LINEAR || modifier == DRM_FORMAT_MOD_LINEAR) {
@@ -443,7 +449,10 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
       ubwc_enabled = false;
 
    /* expect UBWC enabled if we asked for it */
-   assert(modifier != DRM_FORMAT_MOD_QCOM_COMPRESSED || ubwc_enabled);
+   if (modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED)
+      assert(ubwc_enabled);
+   else if (device->physical_device->instance->debug_flags & TU_DEBUG_NOUBWC)
+      ubwc_enabled = false;
 
    /* Non-UBWC tiled R8G8 is probably buggy since media formats are always
     * either linear or UBWC. There is no simple test to reproduce the bug.
@@ -505,6 +514,9 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
          assert(plane_layouts); /* can only fail with explicit layout */
          return vk_error(device, VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT);
       }
+
+      if (device->instance->debug_flags & TU_DEBUG_LAYOUT)
+         fdl_dump_layout(layout);
 
       /* fdl6_layout can't take explicit offset without explicit pitch
        * add offset manually for extra layouts for planes

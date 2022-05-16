@@ -32,11 +32,12 @@
 enum { DEPTH_CLEAR_SLOW, DEPTH_CLEAR_FAST };
 
 static void
-build_color_shaders(struct nir_shader **out_vs, struct nir_shader **out_fs, uint32_t frag_output)
+build_color_shaders(struct radv_device *dev, struct nir_shader **out_vs, struct nir_shader **out_fs,
+                    uint32_t frag_output)
 {
-   nir_builder vs_b = radv_meta_init_shader(MESA_SHADER_VERTEX, "meta_clear_color_vs");
+   nir_builder vs_b = radv_meta_init_shader(dev, MESA_SHADER_VERTEX, "meta_clear_color_vs");
    nir_builder fs_b =
-      radv_meta_init_shader(MESA_SHADER_FRAGMENT, "meta_clear_color_fs-%d", frag_output);
+      radv_meta_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_clear_color_fs-%d", frag_output);
 
    const struct glsl_type *position_type = glsl_vec4_type();
    const struct glsl_type *color_type = glsl_vec4_type();
@@ -182,7 +183,7 @@ create_color_pipeline(struct radv_device *device, uint32_t samples, uint32_t fra
       return VK_SUCCESS;
    }
 
-   build_color_shaders(&vs_nir, &fs_nir, frag_output);
+   build_color_shaders(device, &vs_nir, &fs_nir, frag_output);
 
    const VkPipelineVertexInputStateCreateInfo vi_state = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -384,13 +385,14 @@ emit_color_clear(struct radv_cmd_buffer *cmd_buffer, const VkClearAttachment *cl
 }
 
 static void
-build_depthstencil_shader(struct nir_shader **out_vs, struct nir_shader **out_fs, bool unrestricted)
+build_depthstencil_shader(struct radv_device *dev, struct nir_shader **out_vs,
+                          struct nir_shader **out_fs, bool unrestricted)
 {
    nir_builder vs_b = radv_meta_init_shader(
-      MESA_SHADER_VERTEX,
+      dev, MESA_SHADER_VERTEX,
       unrestricted ? "meta_clear_depthstencil_unrestricted_vs" : "meta_clear_depthstencil_vs");
    nir_builder fs_b = radv_meta_init_shader(
-      MESA_SHADER_FRAGMENT,
+      dev, MESA_SHADER_FRAGMENT,
       unrestricted ? "meta_clear_depthstencil_unrestricted_fs" : "meta_clear_depthstencil_fs");
 
    const struct glsl_type *position_out_type = glsl_vec4_type();
@@ -445,7 +447,7 @@ create_depthstencil_pipeline(struct radv_device *device, VkImageAspectFlags aspe
       return VK_SUCCESS;
    }
 
-   build_depthstencil_shader(&vs_nir, &fs_nir, unrestricted);
+   build_depthstencil_shader(device, &vs_nir, &fs_nir, unrestricted);
 
    const VkPipelineVertexInputStateCreateInfo vi_state = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -903,14 +905,14 @@ radv_fast_clear_depth(struct radv_cmd_buffer *cmd_buffer, const struct radv_imag
 }
 
 static nir_shader *
-build_clear_htile_mask_shader()
+build_clear_htile_mask_shader(struct radv_device *dev)
 {
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_COMPUTE, "meta_clear_htile_mask");
+   nir_builder b = radv_meta_init_shader(dev, MESA_SHADER_COMPUTE, "meta_clear_htile_mask");
    b.shader->info.workgroup_size[0] = 64;
 
    nir_ssa_def *global_id = get_global_ids(&b, 1);
 
-   nir_ssa_def *offset = nir_imul(&b, global_id, nir_imm_int(&b, 16));
+   nir_ssa_def *offset = nir_imul_imm(&b, global_id, 16);
    offset = nir_channel(&b, offset, 0);
 
    nir_ssa_def *buf = radv_meta_load_descriptor(&b, 0, 0);
@@ -933,7 +935,7 @@ init_meta_clear_htile_mask_state(struct radv_device *device)
 {
    struct radv_meta_state *state = &device->meta_state;
    VkResult result;
-   nir_shader *cs = build_clear_htile_mask_shader();
+   nir_shader *cs = build_clear_htile_mask_shader(device);
 
    VkDescriptorSetLayoutCreateInfo ds_layout_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1000,13 +1002,14 @@ fail:
  * For MSAA images, clearing the first sample should be enough as long as CMASK is also cleared.
  */
 static nir_shader *
-build_clear_dcc_comp_to_single_shader(bool is_msaa)
+build_clear_dcc_comp_to_single_shader(struct radv_device *dev, bool is_msaa)
 {
    enum glsl_sampler_dim dim = is_msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D;
    const struct glsl_type *img_type = glsl_image_type(dim, true, GLSL_TYPE_FLOAT);
 
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_COMPUTE, "meta_clear_dcc_comp_to_single-%s",
-                                         is_msaa ? "multisampled" : "singlesampled");
+   nir_builder b =
+      radv_meta_init_shader(dev, MESA_SHADER_COMPUTE, "meta_clear_dcc_comp_to_single-%s",
+                            is_msaa ? "multisampled" : "singlesampled");
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
 
@@ -1049,7 +1052,7 @@ create_dcc_comp_to_single_pipeline(struct radv_device *device, bool is_msaa, VkP
 {
    struct radv_meta_state *state = &device->meta_state;
    VkResult result;
-   nir_shader *cs = build_clear_dcc_comp_to_single_shader(is_msaa);
+   nir_shader *cs = build_clear_dcc_comp_to_single_shader(device, is_msaa);
 
    VkPipelineShaderStageCreateInfo shader_stage = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -1265,7 +1268,7 @@ radv_clear_cmask(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
    uint64_t offset = image->offset + image->planes[0].surface.cmask_offset;
    uint64_t size;
 
-   if (cmd_buffer->device->physical_device->rad_info.chip_class == GFX9) {
+   if (cmd_buffer->device->physical_device->rad_info.gfx_level == GFX9) {
       /* TODO: clear layers. */
       size = image->planes[0].surface.cmask_size;
    } else {
@@ -1311,12 +1314,12 @@ radv_clear_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
       uint32_t level = range->baseMipLevel + l;
       uint64_t size;
 
-      if (cmd_buffer->device->physical_device->rad_info.chip_class >= GFX10) {
+      if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX10) {
          /* DCC for mipmaps+layers is currently disabled. */
          offset += image->planes[0].surface.meta_slice_size * range->baseArrayLayer +
                    image->planes[0].surface.u.gfx9.meta_levels[level].offset;
          size = image->planes[0].surface.u.gfx9.meta_levels[level].size * layer_count;
-      } else if (cmd_buffer->device->physical_device->rad_info.chip_class == GFX9) {
+      } else if (cmd_buffer->device->physical_device->rad_info.gfx_level == GFX9) {
          /* Mipmap levels and layers aren't implemented. */
          assert(level == 0);
          size = image->planes[0].surface.meta_size;
@@ -1411,7 +1414,7 @@ radv_clear_dcc_comp_to_single(struct radv_cmd_buffer *cmd_buffer,
                                  .baseArrayLayer = range->baseArrayLayer,
                                  .layerCount = layer_count},
          },
-         &(struct radv_image_view_extra_create_info){.disable_compression = true});
+         0, &(struct radv_image_view_extra_create_info){.disable_compression = true});
 
       radv_meta_push_descriptor_set(
          cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1469,7 +1472,7 @@ radv_clear_htile(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *im
    htile_mask = radv_get_htile_mask(cmd_buffer->device, image, range->aspectMask);
 
    if (level_count != image->info.levels) {
-      assert(cmd_buffer->device->physical_device->rad_info.chip_class >= GFX10);
+      assert(cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX10);
 
       /* Clear individuals levels separately. */
       for (uint32_t l = 0; l < level_count; l++) {
@@ -1664,7 +1667,7 @@ radv_can_fast_clear_color(struct radv_cmd_buffer *cmd_buffer, const struct radv_
                                    &can_avoid_fast_clear_elim);
 
       if (iview->image->info.levels > 1) {
-         if (cmd_buffer->device->physical_device->rad_info.chip_class >= GFX9) {
+         if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX9) {
             uint32_t last_level = iview->base_mip + iview->level_count - 1;
             if (last_level >= iview->image->planes[0].surface.num_meta_levels) {
                /* Do not fast clears if one level can't be fast cleard. */
@@ -1970,7 +1973,7 @@ radv_clear_image_layer(struct radv_cmd_buffer *cmd_buffer, struct radv_image *im
                                                 .baseArrayLayer = range->baseArrayLayer,
                                                 .layerCount = layer_count},
                         },
-                        NULL);
+                        0, NULL);
 
    VkClearAttachment clear_att = {
       .aspectMask = range->aspectMask,
@@ -2068,7 +2071,7 @@ radv_fast_clear_range(struct radv_cmd_buffer *cmd_buffer, struct radv_image *ima
                                  .layerCount = range->layerCount,
                               },
                         },
-                        NULL);
+                        0, NULL);
 
    VkClearRect clear_rect = {
       .rect =

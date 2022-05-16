@@ -34,7 +34,7 @@
 
 #include <stdio.h>
 
-#include "radeon/radeon_winsys.h"
+#include "winsys/radeon_winsys.h"
 
 #include "util/disk_cache.h"
 #include "util/u_blitter.h"
@@ -329,7 +329,7 @@ struct r600_common_screen {
 	struct pipe_screen		b;
 	struct radeon_winsys		*ws;
 	enum radeon_family		family;
-	enum chip_class			chip_class;
+	enum amd_gfx_level			gfx_level;
 	struct radeon_info		info;
 	uint64_t			debug_flags;
 	bool				has_cp_dma;
@@ -492,7 +492,7 @@ struct r600_common_context {
 	struct radeon_winsys		*ws;
 	struct radeon_winsys_ctx	*ctx;
 	enum radeon_family		family;
-	enum chip_class			chip_class;
+	enum amd_gfx_level			gfx_level;
 	struct r600_ring		gfx;
 	struct r600_ring		dma;
 	struct pipe_fence_handle	*last_gfx_fence;
@@ -615,7 +615,7 @@ struct r600_common_context {
 
 	void (*check_vm_faults)(struct r600_common_context *ctx,
 				struct radeon_saved_cs *saved,
-				enum ring_type ring);
+				enum amd_ip_type ring);
 };
 
 /* r600_buffer_common.c */

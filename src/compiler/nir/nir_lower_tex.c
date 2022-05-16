@@ -767,6 +767,9 @@ lower_tex_to_txd(nir_builder *b, nir_tex_instr *tex)
    txd->coord_components = tex->coord_components;
    txd->texture_index = tex->texture_index;
    txd->sampler_index = tex->sampler_index;
+   txd->is_array = tex->is_array;
+   txd->is_shadow = tex->is_shadow;
+   txd->is_new_style_shadow = tex->is_new_style_shadow;
 
    /* reuse existing srcs */
    for (unsigned i = 0; i < tex->num_srcs; i++) {
@@ -803,6 +806,9 @@ lower_txb_to_txl(nir_builder *b, nir_tex_instr *tex)
    txl->coord_components = tex->coord_components;
    txl->texture_index = tex->texture_index;
    txl->sampler_index = tex->sampler_index;
+   txl->is_array = tex->is_array;
+   txl->is_shadow = tex->is_shadow;
+   txl->is_new_style_shadow = tex->is_new_style_shadow;
 
    /* reuse all but bias src */
    for (int i = 0; i < 2; i++) {
@@ -1334,9 +1340,10 @@ nir_lower_tex_block(nir_block *block, nir_builder *b,
       }
 
       if ((tex->sampler_dim == GLSL_SAMPLER_DIM_RECT) && options->lower_rect &&
-          tex->op != nir_texop_txf && !nir_tex_instr_is_query(tex)) {
-
-         if (compiler_options->has_txs)
+          tex->op != nir_texop_txf) {
+         if (nir_tex_instr_is_query(tex))
+            tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+         else if (compiler_options->has_txs)
             lower_rect(b, tex);
          else
             lower_rect_tex_scale(b, tex);
@@ -1479,7 +1486,8 @@ nir_lower_tex_block(nir_block *block, nir_builder *b,
        * use an explicit LOD of 0.
        * But don't touch RECT samplers because they don't have mips.
        */
-      if (nir_tex_instr_has_implicit_derivative(tex) &&
+      if (options->lower_invalid_implicit_lod &&
+          nir_tex_instr_has_implicit_derivative(tex) &&
           tex->sampler_dim != GLSL_SAMPLER_DIM_RECT &&
           !nir_shader_supports_implicit_lod(b->shader)) {
          lower_zero_lod(b, tex);

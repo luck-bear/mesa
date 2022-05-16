@@ -48,9 +48,6 @@
 #include "midgard/midgard_compile.h"
 #include "compiler/shader_enums.h"
 
-/* Forward declare to avoid extra header dep */
-struct prim_convert_context;
-
 #define SET_BIT(lval, bit, cond) \
 	if (cond) \
 		lval |= (bit); \
@@ -68,10 +65,16 @@ enum pan_dirty_3d {
         PAN_DIRTY_PARAMS         = BITFIELD_BIT(3),
         PAN_DIRTY_DRAWID         = BITFIELD_BIT(4),
         PAN_DIRTY_TLS_SIZE       = BITFIELD_BIT(5),
+        PAN_DIRTY_ZS             = BITFIELD_BIT(6),
+        PAN_DIRTY_BLEND          = BITFIELD_BIT(7),
+        PAN_DIRTY_MSAA           = BITFIELD_BIT(8),
+        PAN_DIRTY_OQ             = BITFIELD_BIT(9),
+        PAN_DIRTY_RASTERIZER     = BITFIELD_BIT(10),
+        PAN_DIRTY_POINTS         = BITFIELD_BIT(11),
 };
 
 enum pan_dirty_shader {
-        PAN_DIRTY_STAGE_RENDERER = BITFIELD_BIT(0),
+        PAN_DIRTY_STAGE_SHADER   = BITFIELD_BIT(0),
         PAN_DIRTY_STAGE_TEXTURE  = BITFIELD_BIT(1),
         PAN_DIRTY_STAGE_SAMPLER  = BITFIELD_BIT(2),
         PAN_DIRTY_STAGE_IMAGE    = BITFIELD_BIT(3),
@@ -250,13 +253,34 @@ struct pan_linkage {
 #define RSD_WORDS 16
 
 /* Variants bundle together to form the backing CSO, bundling multiple
- * shaders with varying emulated features baked in */
+ * shaders with varying emulated features baked in
+ */
+struct panfrost_fs_key {
+        /* Number of colour buffers */
+        unsigned nr_cbufs;
+
+        /* Midgard shaders that read the tilebuffer must be keyed for
+         * non-blendable formats
+         */
+        enum pipe_format rt_formats[8];
+
+        /* From rasterize state, to lower point sprites */
+        uint16_t sprite_coord_enable;
+
+        /* User clip plane lowering */
+        uint8_t clip_plane_enable;
+};
+
+struct panfrost_shader_key {
+        /* Valhall needs special handling for desktop GL varyings */
+        uint32_t fixed_varying_mask;
+
+        /* If we need vertex shader keys, union it in */
+        struct panfrost_fs_key fs;
+};
 
 /* A shader state corresponds to the actual, current variant of the shader */
 struct panfrost_shader_state {
-        /* Compiled, mapped descriptor, ready for the hardware */
-        bool compiled;
-
         /* Respectively, shader binary and Renderer State Descriptor */
         struct panfrost_pool_ref bin, state;
 
@@ -271,9 +295,7 @@ struct panfrost_shader_state {
         struct pipe_stream_output_info stream_output;
         uint64_t so_mask;
 
-        /* Variants */
-        enum pipe_format rt_formats[8];
-        unsigned nr_cbufs;
+        struct panfrost_shader_key key;
 
         /* Mask of state that dirties the sysvals */
         unsigned dirty_3d, dirty_shader;
@@ -281,14 +303,11 @@ struct panfrost_shader_state {
 
 /* A collection of varyings (the CSO) */
 struct panfrost_shader_variants {
-        /* A panfrost_shader_variants can represent a shader for
-         * either graphics or compute */
-
-        bool is_compute;
+        nir_shader *nir;
 
         union {
-                struct pipe_shader_state base;
-                struct pipe_compute_state cbase;
+                struct pipe_stream_output_info stream_output;
+                unsigned req_input_mem;
         };
 
         /** Lock for the variants array */
@@ -298,6 +317,12 @@ struct panfrost_shader_variants {
         unsigned variant_space;
 
         unsigned variant_count;
+
+        /* On vertex shaders, bit mask of special desktop-only varyings to link
+         * with the fragment shader. Used on Valhall to implement separable
+         * shaders for desktop GL.
+         */
+        uint32_t fixed_varying_mask;
 
         /* The current active variant */
         unsigned active_variant;
@@ -365,12 +390,13 @@ bool
 panfrost_render_condition_check(struct panfrost_context *ctx);
 
 void
+panfrost_update_shader_variant(struct panfrost_context *ctx,
+                               enum pipe_shader_type type);
+void
 panfrost_shader_compile(struct pipe_screen *pscreen,
                         struct panfrost_pool *shader_pool,
                         struct panfrost_pool *desc_pool,
-                        enum pipe_shader_ir ir_type,
-                        const void *ir,
-                        gl_shader_stage stage,
+                        const nir_shader *ir,
                         struct panfrost_shader_state *state);
 
 void

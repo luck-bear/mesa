@@ -34,8 +34,10 @@
 #include "pvr_srv_bridge.h"
 #include "pvr_srv_job_compute.h"
 #include "pvr_srv_job_render.h"
+#include "pvr_srv_job_transfer.h"
 #include "pvr_srv_public.h"
-#include "pvr_srv_syncobj.h"
+#include "pvr_srv_sync.h"
+#include "pvr_srv_job_null.h"
 #include "pvr_winsys.h"
 #include "pvr_winsys_helper.h"
 #include "util/log.h"
@@ -123,10 +125,10 @@ static VkResult pvr_srv_memctx_init(struct pvr_srv_winsys *srv_ws)
    const struct pvr_winsys_static_data_offsets usc_heap_static_data_offsets = {
       .vdm_sync = FWIF_USC_HEAP_VDM_SYNC_OFFSET_BYTES,
    };
-   const struct pvr_winsys_static_data_offsets
-      rgn_hdr_heap_static_data_offsets = { 0 };
+   const struct pvr_winsys_static_data_offsets no_static_data_offsets = { 0 };
 
    char heap_name[PVR_SRV_DEVMEM_HEAPNAME_MAXLENGTH];
+   int vis_test_heap_idx = -1;
    int general_heap_idx = -1;
    int rgn_hdr_heap_idx = -1;
    int pds_heap_idx = -1;
@@ -181,11 +183,17 @@ static VkResult pvr_srv_memctx_init(struct pvr_srv_winsys *srv_ws)
                          PVR_SRV_USCCODE_HEAP_IDENT,
                          sizeof(PVR_SRV_USCCODE_HEAP_IDENT)) == 0) {
          usc_heap_idx = i;
+      } else if (vis_test_heap_idx == -1 &&
+                 strncmp(heap_name,
+                         PVR_SRV_VISIBILITY_TEST_HEAP_IDENT,
+                         sizeof(PVR_SRV_VISIBILITY_TEST_HEAP_IDENT)) == 0) {
+         vis_test_heap_idx = i;
       }
    }
 
-   /* Check for and initialize required heaps. */
-   if (general_heap_idx == -1 || pds_heap_idx == -1 || usc_heap_idx == -1) {
+   /* Check for and initialise required heaps. */
+   if (general_heap_idx == -1 || pds_heap_idx == -1 || usc_heap_idx == -1 ||
+       vis_test_heap_idx == -1) {
       result = vk_error(NULL, VK_ERROR_INITIALIZATION_FAILED);
       goto err_pvr_srv_int_ctx_destroy;
    }
@@ -211,14 +219,21 @@ static VkResult pvr_srv_memctx_init(struct pvr_srv_winsys *srv_ws)
    if (result != VK_SUCCESS)
       goto err_pvr_srv_heap_finish_pds;
 
+   result = pvr_srv_heap_init(srv_ws,
+                              &srv_ws->vis_test_heap,
+                              vis_test_heap_idx,
+                              &no_static_data_offsets);
+   if (result != VK_SUCCESS)
+      goto err_pvr_srv_heap_finish_usc;
+
    /* Check for and set up optional heaps. */
    if (rgn_hdr_heap_idx != -1) {
       result = pvr_srv_heap_init(srv_ws,
                                  &srv_ws->rgn_hdr_heap,
                                  rgn_hdr_heap_idx,
-                                 &rgn_hdr_heap_static_data_offsets);
+                                 &no_static_data_offsets);
       if (result != VK_SUCCESS)
-         goto err_pvr_srv_heap_finish_usc;
+         goto err_pvr_srv_heap_finish_vis_test;
       srv_ws->rgn_hdr_heap_present = true;
    } else {
       srv_ws->rgn_hdr_heap_present = false;
@@ -254,6 +269,9 @@ err_pvr_srv_heap_finish_rgn_hdr:
    if (srv_ws->rgn_hdr_heap_present)
       pvr_srv_heap_finish(srv_ws, &srv_ws->rgn_hdr_heap);
 
+err_pvr_srv_heap_finish_vis_test:
+   pvr_srv_heap_finish(srv_ws, &srv_ws->vis_test_heap);
+
 err_pvr_srv_heap_finish_usc:
    pvr_srv_heap_finish(srv_ws, &srv_ws->usc_heap);
 
@@ -281,6 +299,12 @@ static void pvr_srv_memctx_finish(struct pvr_srv_winsys *srv_ws)
                    VK_ERROR_UNKNOWN,
                    "Region header heap in use, can not deinit");
       }
+   }
+
+   if (!pvr_srv_heap_finish(srv_ws, &srv_ws->vis_test_heap)) {
+      vk_errorf(NULL,
+                VK_ERROR_UNKNOWN,
+                "Visibility test heap in use, can not deinit");
    }
 
    if (!pvr_srv_heap_finish(srv_ws, &srv_ws->usc_heap))
@@ -328,10 +352,13 @@ static void pvr_srv_winsys_destroy(struct pvr_winsys *ws)
    pvr_srv_connection_destroy(fd);
 }
 
-static int pvr_srv_winsys_device_info_init(struct pvr_winsys *ws,
-                                           struct pvr_device_info *dev_info)
+static int
+pvr_srv_winsys_device_info_init(struct pvr_winsys *ws,
+                                struct pvr_device_info *dev_info,
+                                struct pvr_device_runtime_info *runtime_info)
 {
    struct pvr_srv_winsys *srv_ws = to_pvr_srv_winsys(ws);
+   VkResult result;
    int ret;
 
    ret = pvr_device_info_init(dev_info, srv_ws->bvnc);
@@ -342,6 +369,17 @@ static int pvr_srv_winsys_device_info_init(struct pvr_winsys *ws,
                 PVR_BVNC_UNPACK_N(srv_ws->bvnc),
                 PVR_BVNC_UNPACK_C(srv_ws->bvnc));
       return ret;
+   }
+
+   if (PVR_HAS_FEATURE(dev_info, gpu_multicore_support)) {
+      result = pvr_srv_get_multicore_info(srv_ws->render_fd,
+                                          0,
+                                          NULL,
+                                          &runtime_info->core_count);
+      if (result != VK_SUCCESS)
+         return -ENODEV;
+   } else {
+      runtime_info->core_count = 1;
    }
 
    return 0;
@@ -355,6 +393,7 @@ static void pvr_srv_winsys_get_heaps_info(struct pvr_winsys *ws,
    heaps->general_heap = &srv_ws->general_heap.base;
    heaps->pds_heap = &srv_ws->pds_heap.base;
    heaps->usc_heap = &srv_ws->usc_heap.base;
+   heaps->vis_test_heap = &srv_ws->vis_test_heap.base;
 
    if (srv_ws->rgn_hdr_heap_present)
       heaps->rgn_hdr_heap = &srv_ws->rgn_hdr_heap.base;
@@ -376,12 +415,6 @@ static const struct pvr_winsys_ops srv_winsys_ops = {
    .heap_free = pvr_srv_winsys_heap_free,
    .vma_map = pvr_srv_winsys_vma_map,
    .vma_unmap = pvr_srv_winsys_vma_unmap,
-   .syncobj_create = pvr_srv_winsys_syncobj_create,
-   .syncobj_destroy = pvr_srv_winsys_syncobj_destroy,
-   .syncobjs_reset = pvr_srv_winsys_syncobjs_reset,
-   .syncobjs_signal = pvr_srv_winsys_syncobjs_signal,
-   .syncobjs_wait = pvr_srv_winsys_syncobjs_wait,
-   .syncobjs_merge = pvr_srv_winsys_syncobjs_merge,
    .free_list_create = pvr_srv_winsys_free_list_create,
    .free_list_destroy = pvr_srv_winsys_free_list_destroy,
    .render_target_dataset_create = pvr_srv_render_target_dataset_create,
@@ -392,6 +425,9 @@ static const struct pvr_winsys_ops srv_winsys_ops = {
    .compute_ctx_create = pvr_srv_winsys_compute_ctx_create,
    .compute_ctx_destroy = pvr_srv_winsys_compute_ctx_destroy,
    .compute_submit = pvr_srv_winsys_compute_submit,
+   .transfer_ctx_create = pvr_srv_winsys_transfer_ctx_create,
+   .transfer_ctx_destroy = pvr_srv_winsys_transfer_ctx_destroy,
+   .null_job_submit = pvr_srv_winsys_null_job_submit,
 };
 
 static bool pvr_is_driver_compatible(int render_fd)
@@ -404,7 +440,7 @@ static bool pvr_is_driver_compatible(int render_fd)
 
    assert(strcmp(version->name, "pvr") == 0);
 
-   /* Only the 1.14 driver is supported for now. */
+   /* Only the 1.17 driver is supported for now. */
    if (version->version_major != PVR_SRV_VERSION_MAJ ||
        version->version_minor != PVR_SRV_VERSION_MIN) {
       vk_errorf(NULL,
@@ -433,6 +469,10 @@ struct pvr_winsys *pvr_srv_winsys_create(int master_fd,
    if (!pvr_is_driver_compatible(render_fd))
       return NULL;
 
+   result = pvr_srv_init_module(render_fd, PVR_SRVKM_MODULE_TYPE_SERVICES);
+   if (result != VK_SUCCESS)
+      return NULL;
+
    result = pvr_srv_connection_create(render_fd, &bvnc);
    if (result != VK_SUCCESS)
       return NULL;
@@ -449,6 +489,10 @@ struct pvr_winsys *pvr_srv_winsys_create(int master_fd,
    srv_ws->master_fd = master_fd;
    srv_ws->render_fd = render_fd;
    srv_ws->alloc = alloc;
+
+   srv_ws->base.syncobj_type = pvr_srv_sync_type;
+   srv_ws->base.sync_types[0] = &srv_ws->base.syncobj_type;
+   srv_ws->base.sync_types[1] = NULL;
 
    result = pvr_srv_memctx_init(srv_ws);
    if (result != VK_SUCCESS)

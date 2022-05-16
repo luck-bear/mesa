@@ -28,6 +28,7 @@
 #include "aco_opcodes.h"
 #include "aco_util.h"
 
+#include "aco_shader_info.h"
 #include "vulkan/radv_shader.h"
 
 #include "nir.h"
@@ -37,8 +38,6 @@
 #include <vector>
 
 struct radv_shader_args;
-struct radv_shader_info;
-struct radv_vs_prolog_key;
 
 namespace aco {
 
@@ -271,9 +270,9 @@ struct wait_imm {
 
    wait_imm();
    wait_imm(uint16_t vm_, uint16_t exp_, uint16_t lgkm_, uint16_t vs_);
-   wait_imm(enum chip_class chip, uint16_t packed);
+   wait_imm(enum amd_gfx_level chip, uint16_t packed);
 
-   uint16_t pack(enum chip_class chip) const;
+   uint16_t pack(enum amd_gfx_level chip) const;
 
    bool combine(const wait_imm& other);
 
@@ -669,10 +668,10 @@ public:
       return Operand::c8(0);
    }
 
-   /* This is useful over the constructors when you want to take a chip class
+   /* This is useful over the constructors when you want to take a gfx level
     * for 1/2 PI or an unknown operand size.
     */
-   static Operand get_const(enum chip_class chip, uint64_t val, unsigned bytes)
+   static Operand get_const(enum amd_gfx_level chip, uint64_t val, unsigned bytes)
    {
       if (val == 0x3e22f983 && bytes == 4 && chip >= GFX8) {
          /* 1/2 PI can be an inline constant on GFX8+ */
@@ -895,8 +894,7 @@ private:
 class Definition final {
 public:
    constexpr Definition()
-       : temp(Temp(0, s1)), reg_(0), isFixed_(0), hasHint_(0), isKill_(0), isPrecise_(0), isNUW_(0),
-         isNoCSE_(0)
+       : temp(Temp(0, s1)), reg_(0), isFixed_(0), isKill_(0), isPrecise_(0), isNUW_(0), isNoCSE_(0)
    {}
    Definition(uint32_t index, RegClass type) noexcept : temp(index, type) {}
    explicit Definition(Temp tmp) noexcept : temp(tmp) {}
@@ -932,14 +930,6 @@ public:
       reg_ = reg;
    }
 
-   constexpr void setHint(PhysReg reg) noexcept
-   {
-      hasHint_ = 1;
-      reg_ = reg;
-   }
-
-   constexpr bool hasHint() const noexcept { return hasHint_; }
-
    constexpr void setKill(bool flag) noexcept { isKill_ = flag; }
 
    constexpr bool isKill() const noexcept { return isKill_; }
@@ -963,7 +953,6 @@ private:
    union {
       struct {
          uint8_t isFixed_ : 1;
-         uint8_t hasHint_ : 1;
          uint8_t isKill_ : 1;
          uint8_t isPrecise_ : 1;
          uint8_t isNUW_ : 1;
@@ -1525,8 +1514,8 @@ static_assert(sizeof(Interp_instruction) == sizeof(Instruction) + 4, "Unexpected
 struct DS_instruction : public Instruction {
    memory_sync_info sync;
    bool gds;
-   int16_t offset0;
-   int8_t offset1;
+   uint16_t offset0;
+   uint8_t offset1;
    uint8_t padding;
 };
 static_assert(sizeof(DS_instruction) == sizeof(Instruction) + 8, "Unexpected padding");
@@ -1777,12 +1766,12 @@ memory_sync_info get_sync_info(const Instruction* instr);
 
 bool is_dead(const std::vector<uint16_t>& uses, Instruction* instr);
 
-bool can_use_opsel(chip_class chip, aco_opcode op, int idx);
-bool instr_is_16bit(chip_class chip, aco_opcode op);
-bool can_use_SDWA(chip_class chip, const aco_ptr<Instruction>& instr, bool pre_ra);
+bool can_use_opsel(amd_gfx_level gfx_level, aco_opcode op, int idx);
+bool instr_is_16bit(amd_gfx_level gfx_level, aco_opcode op);
+bool can_use_SDWA(amd_gfx_level gfx_level, const aco_ptr<Instruction>& instr, bool pre_ra);
 bool can_use_DPP(const aco_ptr<Instruction>& instr, bool pre_ra, bool dpp8);
 /* updates "instr" and returns the old instruction (or NULL if no update was needed) */
-aco_ptr<Instruction> convert_to_SDWA(chip_class chip, aco_ptr<Instruction>& instr);
+aco_ptr<Instruction> convert_to_SDWA(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr);
 aco_ptr<Instruction> convert_to_DPP(aco_ptr<Instruction>& instr, bool dpp8);
 bool needs_exec_mask(const Instruction* instr);
 
@@ -2062,11 +2051,9 @@ public:
    std::vector<Block> blocks;
    std::vector<RegClass> temp_rc = {s1};
    RegisterDemand max_reg_demand = RegisterDemand();
-   uint16_t num_waves = 0;
-   uint16_t max_waves = 0; /* maximum number of waves, regardless of register usage */
    ac_shader_config* config;
-   const struct radv_shader_info* info;
-   enum chip_class chip_class;
+   struct aco_shader_info info;
+   enum amd_gfx_level gfx_level;
    enum radeon_family family;
    DeviceInfo dev;
    unsigned wave_size;
@@ -2079,6 +2066,7 @@ public:
    Temp private_segment_buffer;
    Temp scratch_offset;
 
+   uint16_t num_waves = 0;
    uint16_t min_waves = 0;
    unsigned workgroup_size; /* if known; otherwise UINT_MAX */
    bool wgp_mode;
@@ -2162,27 +2150,27 @@ struct ra_test_policy {
 
 void init();
 
-void init_program(Program* program, Stage stage, const struct radv_shader_info* info,
-                  enum chip_class chip_class, enum radeon_family family, bool wgp_mode,
+void init_program(Program* program, Stage stage, const struct aco_shader_info* info,
+                  enum amd_gfx_level gfx_level, enum radeon_family family, bool wgp_mode,
                   ac_shader_config* config);
 
 void select_program(Program* program, unsigned shader_count, struct nir_shader* const* shaders,
                     ac_shader_config* config, const struct radv_nir_compiler_options* options,
-                    const struct radv_shader_info* info,
+                    const struct aco_shader_info* info,
                     const struct radv_shader_args* args);
 void select_gs_copy_shader(Program* program, struct nir_shader* gs_shader, ac_shader_config* config,
                            const struct radv_nir_compiler_options* options,
-                           const struct radv_shader_info* info,
+                           const struct aco_shader_info* info,
                            const struct radv_shader_args* args);
 void select_trap_handler_shader(Program* program, struct nir_shader* shader,
                                 ac_shader_config* config,
                                 const struct radv_nir_compiler_options* options,
-                                const struct radv_shader_info* info,
+                                const struct aco_shader_info* info,
                                 const struct radv_shader_args* args);
-void select_vs_prolog(Program* program, const struct radv_vs_prolog_key* key,
+void select_vs_prolog(Program* program, const struct aco_vs_prolog_key* key,
                       ac_shader_config* config,
                       const struct radv_nir_compiler_options* options,
-                      const struct radv_shader_info* info,
+                      const struct aco_shader_info* info,
                       const struct radv_shader_args* args,
                       unsigned* num_preserved_sgprs);
 
@@ -2255,6 +2243,9 @@ RegisterDemand get_demand_before(RegisterDemand demand, aco_ptr<Instruction>& in
 
 /* number of sgprs that need to be allocated but might notbe addressable as s0-s105 */
 uint16_t get_extra_sgprs(Program* program);
+
+/* adjust num_waves for workgroup size and LDS limits */
+uint16_t max_suitable_waves(Program* program, uint16_t waves);
 
 /* get number of sgprs/vgprs allocated required to address a number of sgprs/vgprs */
 uint16_t get_sgpr_alloc(Program* program, uint16_t addressable_sgprs);

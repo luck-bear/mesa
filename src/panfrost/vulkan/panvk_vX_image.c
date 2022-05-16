@@ -197,12 +197,11 @@ panvk_per_arch(CreateBufferView)(VkDevice _device,
    view->fmt = vk_format_to_pipe_format(pCreateInfo->format);
 
    struct panfrost_device *pdev = &device->physical_device->pdev;
-   unsigned offset = buffer->bo_offset + pCreateInfo->offset;
-   mali_ptr address = buffer->bo->ptr.gpu + offset;
-   unsigned size = pCreateInfo->range == VK_WHOLE_SIZE ?
-                   buffer->bo->size - offset : pCreateInfo->range;
+   mali_ptr address = panvk_buffer_gpu_ptr(buffer, pCreateInfo->offset);
+   unsigned size = panvk_buffer_range(buffer, pCreateInfo->offset,
+                                      pCreateInfo->range);
    unsigned blksz = util_format_get_blocksize(view->fmt);
-   unsigned width = size / blksz;
+   view->elems = size / blksz;
 
    assert(!(address & 63));
 
@@ -226,7 +225,7 @@ panvk_per_arch(CreateBufferView)(VkDevice _device,
       pan_pack(tex, TEXTURE, cfg) {
          cfg.dimension = MALI_TEXTURE_DIMENSION_1D;
          cfg.format = pdev->formats[view->fmt].hw;
-         cfg.width = width;
+         cfg.width = view->elems;
          cfg.depth = cfg.height = 1;
          cfg.swizzle = PAN_V6_SWIZZLE(R, G, B, A);
          cfg.texel_ordering = MALI_TEXTURE_LAYOUT_LINEAR;
@@ -248,15 +247,15 @@ panvk_per_arch(CreateBufferView)(VkDevice _device,
          cfg.type = MALI_ATTRIBUTE_TYPE_3D_LINEAR;
          cfg.pointer = address;
          cfg.stride = blksz;
-         cfg.size = width * blksz;
+         cfg.size = view->elems * blksz;
       }
 
       attrib_buf += pan_size(ATTRIBUTE_BUFFER);
       pan_pack(attrib_buf, ATTRIBUTE_BUFFER_CONTINUATION_3D, cfg) {
-         cfg.s_dimension = width;
+         cfg.s_dimension = view->elems;
          cfg.t_dimension = 1;
          cfg.r_dimension = 1;
-         cfg.row_stride = width * blksz;
+         cfg.row_stride = view->elems * blksz;
       }
    }
 

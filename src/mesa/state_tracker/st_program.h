@@ -40,7 +40,6 @@
 #include "tgsi/tgsi_from_mesa.h"
 #include "st_context.h"
 #include "st_texture.h"
-#include "st_glsl_to_tgsi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -296,7 +295,7 @@ extern void
 st_finalize_nir_before_variants(struct nir_shader *nir);
 
 extern void
-st_prepare_vertex_program(struct gl_program *stvp, uint8_t *attrib_to_index);
+st_prepare_vertex_program(struct gl_program *stvp);
 
 extern void
 st_translate_stream_output_info(struct gl_program *prog);

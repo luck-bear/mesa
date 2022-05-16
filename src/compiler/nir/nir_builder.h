@@ -668,6 +668,12 @@ nir_ieq_imm(nir_builder *build, nir_ssa_def *x, uint64_t y)
    return nir_ieq(build, x, nir_imm_intN_t(build, y, x->bit_size));
 }
 
+static inline nir_ssa_def *
+nir_ine_imm(nir_builder *build, nir_ssa_def *x, uint64_t y)
+{
+  return nir_ine(build, x, nir_imm_intN_t(build, y, x->bit_size));
+}
+
 /* Use nir_iadd(x, -y) for reversing parameter ordering */
 static inline nir_ssa_def *
 nir_isub_imm(nir_builder *build, uint64_t y, nir_ssa_def *x)
@@ -793,6 +799,18 @@ nir_udiv_imm(nir_builder *build, nir_ssa_def *x, uint64_t y)
    } else {
       return nir_udiv(build, x, nir_imm_intN_t(build, y, x->bit_size));
    }
+}
+
+static inline nir_ssa_def *
+nir_ibfe_imm(nir_builder *build, nir_ssa_def *x, uint32_t offset, uint32_t size)
+{
+   return nir_ibfe(build, x, nir_imm_int(build, offset), nir_imm_int(build, size));
+}
+
+static inline nir_ssa_def *
+nir_ubfe_imm(nir_builder *build, nir_ssa_def *x, uint32_t offset, uint32_t size)
+{
+   return nir_ubfe(build, x, nir_imm_int(build, offset), nir_imm_int(build, size));
 }
 
 static inline nir_ssa_def *
@@ -1003,6 +1021,16 @@ nir_bitcast_vector(nir_builder *b, nir_ssa_def *src, unsigned dest_bit_size)
    return nir_extract_bits(b, &src, 1, 0, dest_num_components, dest_bit_size);
 }
 
+static inline nir_ssa_def *
+nir_trim_vector(nir_builder *b, nir_ssa_def *src, unsigned num_components)
+{
+   assert(src->num_components >= num_components);
+   if (src->num_components == num_components)
+      return src;
+
+   return nir_channels(b, src, nir_component_mask(num_components));
+}
+
 /**
  * Pad a value to N components with undefs of matching bit size.
  * If the value already contains >= num_components, it is returned without change.
@@ -1057,6 +1085,21 @@ static inline nir_ssa_def *
 nir_pad_vec4(nir_builder *b, nir_ssa_def *src)
 {
    return nir_pad_vector(b, src, 4);
+}
+
+/**
+ * Resizes a vector by either trimming off components or adding undef
+ * components, as needed.  Only use this helper if it's actually what you
+ * need.  Prefer nir_pad_vector() or nir_trim_vector() instead if you know a
+ * priori which direction you're resizing.
+ */
+static inline nir_ssa_def *
+nir_resize_vector(nir_builder *b, nir_ssa_def *src, unsigned num_components)
+{
+   if (src->num_components < num_components)
+      return nir_pad_vector(b, src, num_components);
+   else
+      return nir_trim_vector(b, src, num_components);
 }
 
 nir_ssa_def *

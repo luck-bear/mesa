@@ -174,6 +174,7 @@ static const struct vk_device_extension_table lvp_device_extensions_supported = 
    .EXT_custom_border_color               = true,
    .EXT_provoking_vertex                  = true,
    .EXT_line_rasterization                = true,
+   .EXT_robustness2                       = true,
    .GOOGLE_decorate_string                = true,
    .GOOGLE_hlsl_functionality1            = true,
 };
@@ -934,6 +935,13 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceFeatures2(
          features->robustImageAccess = true;
          break;
       }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT: {
+         VkPhysicalDeviceRobustness2FeaturesEXT *features = (VkPhysicalDeviceRobustness2FeaturesEXT *)ext;
+         features->robustBufferAccess2 = true;
+         features->robustImageAccess2 = true;
+         features->nullDescriptor = true;
+         break;
+      }
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT: {
          VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT *features = (VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT *)ext;
          features->primitiveTopologyListRestart = true;
@@ -1006,6 +1014,10 @@ lvp_get_physical_device_properties_1_1(struct lvp_physical_device *pdevice,
    p->subgroupSupportedStages = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
    p->subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT;
    p->subgroupQuadOperationsInAllStages = false;
+
+#if LLVM_VERSION_MAJOR >= 10
+   p->subgroupSupportedOperations |= VK_SUBGROUP_FEATURE_SHUFFLE_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT | VK_SUBGROUP_FEATURE_QUAD_BIT;
+#endif
 
    p->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
    p->maxMultiviewViewCount = 6;
@@ -1262,6 +1274,13 @@ VKAPI_ATTR void VKAPI_CALL lvp_GetPhysicalDeviceProperties2(
          props->graphicsPipelineLibraryIndependentInterpolationDecoration = VK_TRUE;
          break;
       }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_EXT: {
+         VkPhysicalDeviceRobustness2PropertiesEXT *props =
+            (VkPhysicalDeviceRobustness2PropertiesEXT *)ext;
+         props->robustStorageBufferAccessSizeAlignment = 1;
+         props->robustUniformBufferAccessSizeAlignment = 1;
+         break;
+      }
       default:
          break;
       }
@@ -1378,6 +1397,16 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(
    return vk_instance_get_physical_device_proc_addr(&instance->vk, pName);
 }
 
+static void
+destroy_pipelines(struct lvp_queue *queue)
+{
+   simple_mtx_lock(&queue->pipeline_lock);
+   while (util_dynarray_contains(&queue->pipeline_destroys, struct lvp_pipeline*)) {
+      lvp_pipeline_destroy(queue->device, util_dynarray_pop(&queue->pipeline_destroys, struct lvp_pipeline*));
+   }
+   simple_mtx_unlock(&queue->pipeline_lock);
+}
+
 static VkResult
 lvp_queue_submit(struct vk_queue *vk_queue,
                  struct vk_queue_submit *submit)
@@ -1405,6 +1434,7 @@ lvp_queue_submit(struct vk_queue *vk_queue,
          vk_sync_as_lvp_pipe_sync(submit->signals[i].sync);
       lvp_pipe_sync_signal_with_fence(queue->device, sync, queue->last_fence);
    }
+   destroy_pipelines(queue);
 
    return VK_SUCCESS;
 }
@@ -1433,17 +1463,24 @@ lvp_queue_init(struct lvp_device *device, struct lvp_queue *queue,
 
    queue->vk.driver_submit = lvp_queue_submit;
 
+   simple_mtx_init(&queue->pipeline_lock, mtx_plain);
+   util_dynarray_init(&queue->pipeline_destroys, NULL);
+
    return VK_SUCCESS;
 }
 
 static void
 lvp_queue_finish(struct lvp_queue *queue)
 {
+   vk_queue_finish(&queue->vk);
+
+   destroy_pipelines(queue);
+   simple_mtx_destroy(&queue->pipeline_lock);
+   util_dynarray_fini(&queue->pipeline_destroys);
+
    u_upload_destroy(queue->uploader);
    cso_destroy_context(queue->cso);
    queue->ctx->destroy(queue->ctx);
-
-   vk_queue_finish(&queue->vk);
 }
 
 static void
@@ -1469,7 +1506,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
    const VkAllocationCallbacks*                pAllocator,
    VkDevice*                                   pDevice)
 {
-   fprintf(stderr, "WARNING: lavapipe is not a conformant vulkan implementation, testing use only.\n");
+   vk_warn_non_conformant_implementation("lavapipe");
 
    LVP_FROM_HANDLE(lvp_physical_device, physical_device, physicalDevice);
    struct lvp_device *device;
@@ -1515,7 +1552,11 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDevice(
    assert(pCreateInfo->queueCreateInfoCount == 1);
    assert(pCreateInfo->pQueueCreateInfos[0].queueFamilyIndex == 0);
    assert(pCreateInfo->pQueueCreateInfos[0].queueCount == 1);
-   lvp_queue_init(device, &device->queue, pCreateInfo->pQueueCreateInfos, 0);
+   result = lvp_queue_init(device, &device->queue, pCreateInfo->pQueueCreateInfos, 0);
+   if (result != VK_SUCCESS) {
+      vk_free(&device->vk.alloc, device);
+      return result;
+   }
 
    *pDevice = lvp_device_to_handle(device);
 

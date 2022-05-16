@@ -208,6 +208,7 @@ enum iris_nos_dep {
 
 struct iris_base_prog_key {
    unsigned program_string_id;
+   bool limit_trig_input_range;
 };
 
 /**
@@ -342,6 +343,7 @@ enum pipe_control_flags
    PIPE_CONTROL_TILE_CACHE_FLUSH                = (1 << 25),
    PIPE_CONTROL_FLUSH_HDC                       = (1 << 26),
    PIPE_CONTROL_PSS_STALL_SYNC                  = (1 << 27),
+   PIPE_CONTROL_L3_READ_ONLY_CACHE_INVALIDATE   = (1 << 28),
 };
 
 #define PIPE_CONTROL_CACHE_FLUSH_BITS \
@@ -356,6 +358,10 @@ enum pipe_control_flags
     PIPE_CONTROL_VF_CACHE_INVALIDATE |      \
     PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE | \
     PIPE_CONTROL_INSTRUCTION_INVALIDATE)
+
+#define PIPE_CONTROL_L3_RO_INVALIDATE_BITS       \
+   (PIPE_CONTROL_L3_READ_ONLY_CACHE_INVALIDATE | \
+    PIPE_CONTROL_CONST_CACHE_INVALIDATE)
 
 enum iris_predicate_state {
    /* The first two states are used if we can determine whether to draw

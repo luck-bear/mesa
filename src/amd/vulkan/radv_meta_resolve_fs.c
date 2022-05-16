@@ -31,29 +31,14 @@
 #include "vk_format.h"
 
 static nir_shader *
-build_nir_vertex_shader(void)
-{
-   const struct glsl_type *vec4 = glsl_vec4_type();
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_VERTEX, "meta_resolve_vs");
-
-   nir_variable *pos_out = nir_variable_create(b.shader, nir_var_shader_out, vec4, "gl_Position");
-   pos_out->data.location = VARYING_SLOT_POS;
-
-   nir_ssa_def *outvec = radv_meta_gen_rect_vertices(&b);
-
-   nir_store_var(&b, pos_out, outvec, 0xf);
-   return b.shader;
-}
-
-static nir_shader *
 build_resolve_fragment_shader(struct radv_device *dev, bool is_integer, int samples)
 {
    const struct glsl_type *vec4 = glsl_vec4_type();
    const struct glsl_type *sampler_type =
       glsl_sampler_type(GLSL_SAMPLER_DIM_MS, false, false, GLSL_TYPE_FLOAT);
 
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_FRAGMENT, "meta_resolve_fs-%d-%s", samples,
-                                         is_integer ? "int" : "float");
+   nir_builder b = radv_meta_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_resolve_fs-%d-%s",
+                                         samples, is_integer ? "int" : "float");
 
    nir_variable *input_img = nir_variable_create(b.shader, nir_var_uniform, sampler_type, "s_tex");
    input_img->data.descriptor_set = 0;
@@ -63,7 +48,7 @@ build_resolve_fragment_shader(struct radv_device *dev, bool is_integer, int samp
    color_out->data.location = FRAG_RESULT_DATA0;
 
    nir_ssa_def *pos_in = nir_channels(&b, nir_load_frag_coord(&b), 0x3);
-   nir_ssa_def *src_offset = nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), 0, 8);
+   nir_ssa_def *src_offset = nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), .range = 8);
 
    nir_ssa_def *pos_int = nir_f2i32(&b, pos_in);
 
@@ -147,7 +132,7 @@ create_resolve_pipeline(struct radv_device *device, int samples_log2, VkFormat f
       is_integer = true;
 
    nir_shader *fs = build_resolve_fragment_shader(device, is_integer, samples);
-   nir_shader *vs = build_nir_vertex_shader();
+   nir_shader *vs = radv_meta_build_nir_vs_generate_vertices(device);
 
    VkPipelineShaderStageCreateInfo pipeline_shader_stages[] = {
       {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -269,7 +254,7 @@ build_depth_stencil_resolve_fragment_shader(struct radv_device *dev, int samples
    const struct glsl_type *sampler_type =
       glsl_sampler_type(GLSL_SAMPLER_DIM_2D, false, false, GLSL_TYPE_FLOAT);
 
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_FRAGMENT, "meta_resolve_fs_%s-%s-%d",
+   nir_builder b = radv_meta_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_resolve_fs_%s-%s-%d",
                                          index == DEPTH_RESOLVE ? "depth" : "stencil",
                                          get_resolve_mode_str(resolve_mode), samples);
 
@@ -401,7 +386,7 @@ create_depth_stencil_resolve_pipeline(struct radv_device *device, int samples_lo
    uint32_t samples = 1 << samples_log2;
    nir_shader *fs =
       build_depth_stencil_resolve_fragment_shader(device, samples, index, resolve_mode);
-   nir_shader *vs = build_nir_vertex_shader();
+   nir_shader *vs = radv_meta_build_nir_vs_generate_vertices(device);
 
    VkPipelineShaderStageCreateInfo pipeline_shader_stages[] = {
       {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -854,7 +839,7 @@ radv_meta_resolve_fragment_image(struct radv_cmd_buffer *cmd_buffer, struct radv
                                     .layerCount = 1,
                                  },
                            },
-                           NULL);
+                           0, NULL);
 
       struct radv_image_view dest_iview;
       radv_image_view_init(&dest_iview, cmd_buffer->device,
@@ -872,7 +857,7 @@ radv_meta_resolve_fragment_image(struct radv_cmd_buffer *cmd_buffer, struct radv
                                     .layerCount = 1,
                                  },
                            },
-                           NULL);
+                           0, NULL);
 
       const VkRenderingAttachmentInfo color_att = {
          .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -1022,7 +1007,7 @@ radv_depth_stencil_resolve_subpass_fs(struct radv_cmd_buffer *cmd_buffer,
                                  .layerCount = 1,
                               },
                         },
-                        NULL);
+                        0, NULL);
 
    emit_depth_stencil_resolve(cmd_buffer, &tsrc_iview, dst_iview,
                               &(VkExtent2D){fb->width, fb->height}, aspects, resolve_mode);

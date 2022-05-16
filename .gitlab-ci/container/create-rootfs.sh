@@ -15,11 +15,15 @@ elif [ $DEBIAN_ARCH = amd64 ]; then
                    inetutils-syslogd
                    iptables
                    libcap2
+                   libfontconfig1
                    libelf1
                    libfdt1
+                   libgl1
+                   libglu1-mesa
                    libllvm11
                    libva2
                    libva-drm2
+                   libvulkan-dev
                    socat
                    spirv-tools
                    sysvinit-core
@@ -36,6 +40,7 @@ INSTALL_CI_FAIRY_PACKAGES="git
 apt-get -y install --no-install-recommends \
     $ARCH_PACKAGES \
     $INSTALL_CI_FAIRY_PACKAGES \
+    $EXTRA_LOCAL_PACKAGES \
     bash \
     ca-certificates \
     firmware-realtek \

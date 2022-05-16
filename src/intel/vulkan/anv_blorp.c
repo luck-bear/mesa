@@ -31,11 +31,9 @@ lookup_blorp_shader(struct blorp_batch *batch,
    struct blorp_context *blorp = batch->blorp;
    struct anv_device *device = blorp->driver_ctx;
 
-   /* The default cache must be a real cache */
-   assert(device->default_pipeline_cache.cache);
-
    struct anv_shader_bin *bin =
-      anv_pipeline_cache_search(&device->default_pipeline_cache, key, key_size);
+      anv_device_search_for_kernel(device, device->blorp_cache,
+                                   key, key_size, NULL);
    if (!bin)
       return false;
 
@@ -61,19 +59,16 @@ upload_blorp_shader(struct blorp_batch *batch, uint32_t stage,
    struct blorp_context *blorp = batch->blorp;
    struct anv_device *device = blorp->driver_ctx;
 
-   /* The blorp cache must be a real cache */
-   assert(device->default_pipeline_cache.cache);
-
    struct anv_pipeline_bind_map bind_map = {
       .surface_count = 0,
       .sampler_count = 0,
    };
 
    struct anv_shader_bin *bin =
-      anv_pipeline_cache_upload_kernel(&device->default_pipeline_cache, stage,
-                                       key, key_size, kernel, kernel_size,
-                                       prog_data, prog_data_size,
-                                       NULL, 0, NULL, &bind_map);
+      anv_device_upload_kernel(device, device->blorp_cache, stage,
+                               key, key_size, kernel, kernel_size,
+                               prog_data, prog_data_size,
+                               NULL, 0, NULL, &bind_map);
 
    if (!bin)
       return false;
@@ -89,9 +84,23 @@ upload_blorp_shader(struct blorp_batch *batch, uint32_t stage,
    return true;
 }
 
-void
+bool
 anv_device_init_blorp(struct anv_device *device)
 {
+   /* BLORP needs its own pipeline cache because, unlike the rest of ANV, it
+    * won't work at all without the cache.  It depends on it for shaders to
+    * remain resident while it runs.  Therefore, we need a special cache just
+    * for BLORP that's forced to always be enabled.
+    */
+   struct vk_pipeline_cache_create_info pcc_info = {
+      .force_enable = true,
+   };
+   device->blorp_cache =
+      vk_pipeline_cache_create(&device->vk, &pcc_info, NULL);
+   if (device->blorp_cache == NULL)
+      return false;
+
+
    const struct blorp_config config = {
       .use_mesh_shading = device->physical->vk.supported_extensions.NV_mesh_shader,
    };
@@ -125,11 +134,13 @@ anv_device_init_blorp(struct anv_device *device)
    default:
       unreachable("Unknown hardware generation");
    }
+   return true;
 }
 
 void
 anv_device_finish_blorp(struct anv_device *device)
 {
+   vk_pipeline_cache_destroy(device->blorp_cache, NULL);
    blorp_finish(&device->blorp);
 }
 
@@ -308,7 +319,7 @@ copy_image(struct anv_cmd_buffer *cmd_buffer,
            VkImageLayout src_image_layout,
            struct anv_image *dst_image,
            VkImageLayout dst_image_layout,
-           const VkImageCopy2KHR *region)
+           const VkImageCopy2 *region)
 {
    VkOffset3D srcOffset =
       anv_sanitize_image_offset(src_image->vk.image_type, region->srcOffset);
@@ -421,9 +432,9 @@ copy_image(struct anv_cmd_buffer *cmd_buffer,
    }
 }
 
-void anv_CmdCopyImage2KHR(
+void anv_CmdCopyImage2(
     VkCommandBuffer                             commandBuffer,
-    const VkCopyImageInfo2KHR*                  pCopyImageInfo)
+    const VkCopyImageInfo2*                     pCopyImageInfo)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_image, src_image, pCopyImageInfo->srcImage);
@@ -466,7 +477,7 @@ copy_buffer_to_image(struct anv_cmd_buffer *cmd_buffer,
                      struct anv_buffer *anv_buffer,
                      struct anv_image *anv_image,
                      VkImageLayout image_layout,
-                     const VkBufferImageCopy2KHR* region,
+                     const VkBufferImageCopy2* region,
                      bool buffer_to_image)
 {
    struct {
@@ -592,9 +603,9 @@ copy_buffer_to_image(struct anv_cmd_buffer *cmd_buffer,
    }
 }
 
-void anv_CmdCopyBufferToImage2KHR(
+void anv_CmdCopyBufferToImage2(
     VkCommandBuffer                             commandBuffer,
-    const VkCopyBufferToImageInfo2KHR*          pCopyBufferToImageInfo)
+    const VkCopyBufferToImageInfo2*             pCopyBufferToImageInfo)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_buffer, src_buffer, pCopyBufferToImageInfo->srcBuffer);
@@ -612,9 +623,9 @@ void anv_CmdCopyBufferToImage2KHR(
    anv_blorp_batch_finish(&batch);
 }
 
-void anv_CmdCopyImageToBuffer2KHR(
+void anv_CmdCopyImageToBuffer2(
     VkCommandBuffer                             commandBuffer,
-    const VkCopyImageToBufferInfo2KHR*          pCopyImageToBufferInfo)
+    const VkCopyImageToBufferInfo2*             pCopyImageToBufferInfo)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_image, src_image, pCopyImageToBufferInfo->srcImage);
@@ -662,7 +673,7 @@ blit_image(struct anv_cmd_buffer *cmd_buffer,
            VkImageLayout src_image_layout,
            struct anv_image *dst_image,
            VkImageLayout dst_image_layout,
-           const VkImageBlit2KHR *region,
+           const VkImageBlit2 *region,
            VkFilter filter)
 {
    const VkImageSubresourceLayers *src_res = &region->srcSubresource;
@@ -773,9 +784,9 @@ blit_image(struct anv_cmd_buffer *cmd_buffer,
    }
 }
 
-void anv_CmdBlitImage2KHR(
+void anv_CmdBlitImage2(
     VkCommandBuffer                             commandBuffer,
-    const VkBlitImageInfo2KHR*                  pBlitImageInfo)
+    const VkBlitImageInfo2*                     pBlitImageInfo)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_image, src_image, pBlitImageInfo->srcImage);
@@ -820,7 +831,7 @@ copy_buffer(struct anv_device *device,
             struct blorp_batch *batch,
             struct anv_buffer *src_buffer,
             struct anv_buffer *dst_buffer,
-            const VkBufferCopy2KHR *region)
+            const VkBufferCopy2 *region)
 {
    struct blorp_address src = {
       .buffer = src_buffer->address.bo,
@@ -838,9 +849,9 @@ copy_buffer(struct anv_device *device,
    blorp_buffer_copy(batch, src, dst, region->size);
 }
 
-void anv_CmdCopyBuffer2KHR(
+void anv_CmdCopyBuffer2(
     VkCommandBuffer                             commandBuffer,
-    const VkCopyBufferInfo2KHR*                 pCopyBufferInfo)
+    const VkCopyBufferInfo2*                    pCopyBufferInfo)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_buffer, src_buffer, pCopyBufferInfo->srcBuffer);
@@ -1452,7 +1463,7 @@ resolve_image(struct anv_cmd_buffer *cmd_buffer,
               VkImageLayout src_image_layout,
               struct anv_image *dst_image,
               VkImageLayout dst_image_layout,
-              const VkImageResolve2KHR *region)
+              const VkImageResolve2 *region)
 {
    assert(region->srcSubresource.aspectMask == region->dstSubresource.aspectMask);
    assert(vk_image_subresource_layer_count(&src_image->vk, &region->srcSubresource) ==
@@ -1492,9 +1503,9 @@ resolve_image(struct anv_cmd_buffer *cmd_buffer,
    }
 }
 
-void anv_CmdResolveImage2KHR(
+void anv_CmdResolveImage2(
     VkCommandBuffer                             commandBuffer,
-    const VkResolveImageInfo2KHR*               pResolveImageInfo)
+    const VkResolveImageInfo2*                  pResolveImageInfo)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_image, src_image, pResolveImageInfo->srcImage);

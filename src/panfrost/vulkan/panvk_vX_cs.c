@@ -389,49 +389,52 @@ panvk_per_arch(emit_ubos)(const struct panvk_pipeline *pipeline,
 {
    struct mali_uniform_buffer_packed *ubos = descs;
 
-   for (unsigned i = 0; i < ARRAY_SIZE(state->sets); i++) {
-      const struct panvk_descriptor_set_layout *set_layout =
-         pipeline->layout->sets[i].layout;
-      const struct panvk_descriptor_set *set = state->sets[i];
-      unsigned offset = pipeline->layout->sets[i].ubo_offset;
-
-      if (!set_layout)
-         continue;
-
-      if (!set) {
-         memset(&ubos[offset], 0, set_layout->num_ubos * sizeof(*ubos));
-      } else {
-         memcpy(&ubos[offset], set->ubos, set_layout->num_ubos * sizeof(*ubos));
-      }
-   }
-
-   unsigned offset = pipeline->layout->num_ubos;
-   for (unsigned i = 0; i < pipeline->layout->num_dyn_ubos; i++) {
-      const struct panvk_buffer_desc *bdesc = &state->dyn.ubos[i];
-      size_t size = (bdesc->size == VK_WHOLE_SIZE && bdesc->buffer) ?
-                    (bdesc->buffer->bo->size - bdesc->offset) :
-                    bdesc->size;
-      mali_ptr address = bdesc->buffer ? bdesc->buffer->bo->ptr.gpu + bdesc->offset : 0;
-
-      if (size)
-         panvk_per_arch(emit_ubo)(address, size, &ubos[offset + i]);
-      else
-         memset(&ubos[offset + i], 0, sizeof(*ubos));
-   }
-
-   for (unsigned i = 0; i < ARRAY_SIZE(pipeline->sysvals); i++) {
-      if (!pipeline->sysvals[i].ids.sysval_count)
-         continue;
-
-      panvk_per_arch(emit_ubo)(pipeline->sysvals[i].ubo ? : state->sysvals[i],
-                               pipeline->sysvals[i].ids.sysval_count * 16,
-                               &ubos[pipeline->sysvals[i].ubo_idx]);
-   }
+   panvk_per_arch(emit_ubo)(state->sysvals_ptr,
+                            sizeof(state->sysvals),
+                            &ubos[PANVK_SYSVAL_UBO_INDEX]);
 
    if (pipeline->layout->push_constants.size) {
       panvk_per_arch(emit_ubo)(state->push_constants,
                                ALIGN_POT(pipeline->layout->push_constants.size, 16),
-                               &ubos[pipeline->layout->push_constants.ubo_idx]);
+                               &ubos[PANVK_PUSH_CONST_UBO_INDEX]);
+   } else {
+      memset(&ubos[PANVK_PUSH_CONST_UBO_INDEX], 0, sizeof(*ubos));
+   }
+
+   for (unsigned s = 0; s < pipeline->layout->num_sets; s++) {
+      const struct panvk_descriptor_set_layout *set_layout =
+         pipeline->layout->sets[s].layout;
+      const struct panvk_descriptor_set *set = state->sets[s];
+
+      unsigned ubo_start =
+         panvk_pipeline_layout_ubo_start(pipeline->layout, s, false);
+
+      if (!set) {
+         unsigned all_ubos = set_layout->num_ubos + set_layout->num_dyn_ubos;
+         memset(&ubos[ubo_start], 0, all_ubos * sizeof(*ubos));
+      } else {
+         memcpy(&ubos[ubo_start], set->ubos,
+                set_layout->num_ubos * sizeof(*ubos));
+
+         unsigned dyn_ubo_start =
+            panvk_pipeline_layout_ubo_start(pipeline->layout, s, true);
+
+         for (unsigned i = 0; i < set_layout->num_dyn_ubos; i++) {
+            const struct panvk_buffer_desc *bdesc =
+               &state->dyn.ubos[pipeline->layout->sets[s].dyn_ubo_offset + i];
+
+            mali_ptr address = panvk_buffer_gpu_ptr(bdesc->buffer,
+                                                    bdesc->offset);
+            size_t size = panvk_buffer_range(bdesc->buffer,
+                                             bdesc->offset, bdesc->size);
+            if (size) {
+               panvk_per_arch(emit_ubo)(address, size,
+                                        &ubos[dyn_ubo_start + i]);
+            } else {
+               memset(&ubos[dyn_ubo_start + i], 0, sizeof(*ubos));
+            }
+         }
+      }
    }
 }
 
@@ -845,13 +848,13 @@ panvk_per_arch(emit_base_fs_rsd)(const struct panvk_device *dev,
                  !pipeline->blend.reads_dest;
 #endif
       } else {
+         cfg.properties.depth_source = MALI_DEPTH_SOURCE_FIXED_FUNCTION;
+
 #if PAN_ARCH == 5
          cfg.shader.shader = 0x1;
          cfg.properties.work_register_count = 1;
-         cfg.properties.depth_source = MALI_DEPTH_SOURCE_FIXED_FUNCTION;
          cfg.properties.force_early_z = true;
 #else
-         cfg.properties.shader_modifies_coverage = true;
          cfg.properties.allow_forward_pixel_to_kill = true;
          cfg.properties.allow_forward_pixel_to_be_killed = true;
          cfg.properties.zs_update_operation = MALI_PIXEL_KILL_STRONG_EARLY;

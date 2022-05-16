@@ -33,8 +33,6 @@ files_libdri = files(
   'dri_screen.h',
   'dri_util.c',
   'dri_util.h',
-  'utils.c',
-  'utils.h',
 )
 
 if with_dri
@@ -45,11 +43,16 @@ if with_dri2
   files_libdri += files('dri2.c')
 endif
 
+libdri_c_args = []
 if with_gallium_zink
+  if get_option('glvnd')
+    libdri_c_args += '-DKOPPER_LIB_NAMES="libEGL_@0@ and libGLX_@0@"'.format(get_option('glvnd-vendor-name'))
+  else
+    libdri_c_args += '-DKOPPER_LIB_NAMES="libEGL and libGLX"'
+  endif
   files_libdri += files('kopper.c')
 endif
 
-libdri_c_args = []
 if with_gallium_softpipe
   libdri_c_args += '-DGALLIUM_SOFTPIPE'
 endif

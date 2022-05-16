@@ -82,7 +82,7 @@ radv_sdma_v4_v5_copy_image_to_buffer(struct radv_cmd_buffer *cmd_buffer, struct 
    unsigned copy_height = DIV_ROUND_UP(image->info.height, image->planes[0].surface.blk_h);
    bool tmz = false;
 
-   uint32_t ib_pad_dw_mask = cmd_buffer->device->physical_device->rad_info.ib_pad_dw_mask[RING_DMA];
+   uint32_t ib_pad_dw_mask = cmd_buffer->device->physical_device->rad_info.ib_pad_dw_mask[AMD_IP_SDMA];
 
    /* Linear -> linear sub-window copy. */
    if (image->planes[0].surface.is_linear) {
@@ -121,7 +121,7 @@ radv_sdma_v4_v5_copy_image_to_buffer(struct radv_cmd_buffer *cmd_buffer, struct 
       unsigned linear_slice_pitch = region->bufferRowLength * copy_height;
       uint64_t tiled_address = src_address;
       uint64_t linear_address = dst_address;
-      bool is_v5 = device->physical_device->rad_info.chip_class >= GFX10;
+      bool is_v5 = device->physical_device->rad_info.gfx_level >= GFX10;
       /* Only SDMA 5 supports DCC with SDMA */
       bool dcc = radv_dcc_enabled(image, 0) && is_v5;
 
@@ -191,6 +191,6 @@ bool
 radv_sdma_copy_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
                      struct radv_buffer *buffer, const VkBufferImageCopy2 *region)
 {
-   assert(cmd_buffer->device->physical_device->rad_info.chip_class >= GFX9);
+   assert(cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX9);
    return radv_sdma_v4_v5_copy_image_to_buffer(cmd_buffer, image, buffer, region);
 }

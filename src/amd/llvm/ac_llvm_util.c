@@ -27,7 +27,6 @@
 
 #include "ac_llvm_build.h"
 #include "c11/threads.h"
-#include "gallivm/lp_bld_misc.h"
 #include "util/bitscan.h"
 #include "util/u_math.h"
 #include <llvm-c/Core.h>
@@ -176,6 +175,14 @@ const char *ac_get_llvm_processor_name(enum radeon_family family)
       return LLVM_VERSION_MAJOR >= 13 ? "gfx1035" : "gfx1030";
    case CHIP_GFX1036: /* TODO: LLVM 15 doesn't support this yet */
       return "gfx1030";
+   case CHIP_GFX1100:
+      return "gfx1100";
+   case CHIP_GFX1101:
+      return "gfx1101";
+   case CHIP_GFX1102:
+      return "gfx1102";
+   case CHIP_GFX1103:
+      return "gfx1103";
    default:
       return "";
    }
@@ -189,10 +196,17 @@ static LLVMTargetMachineRef ac_create_target_machine(enum radeon_family family,
    assert(family >= CHIP_TAHITI);
    const char *triple = (tm_options & AC_TM_SUPPORTS_SPILL) ? "amdgcn-mesa-mesa3d" : "amdgcn--";
    LLVMTargetRef target = ac_get_llvm_target(triple);
+   const char *name = ac_get_llvm_processor_name(family);
 
    LLVMTargetMachineRef tm =
-      LLVMCreateTargetMachine(target, triple, ac_get_llvm_processor_name(family), "", level,
+      LLVMCreateTargetMachine(target, triple, name, "", level,
                               LLVMRelocDefault, LLVMCodeModelDefault);
+
+   if (!ac_is_llvm_processor_supported(tm, name)) {
+      LLVMDisposeTargetMachine(tm);
+      fprintf(stderr, "amd: LLVM doesn't support %s, bailing out...\n", name);
+      return NULL;
+   }
 
    if (out_triple)
       *out_triple = triple;
@@ -314,9 +328,9 @@ void ac_llvm_set_target_features(LLVMValueRef F, struct ac_llvm_context *ctx)
 
    snprintf(features, sizeof(features), "+DumpCode%s%s",
             /* GFX9 has broken VGPR indexing, so always promote alloca to scratch. */
-            ctx->chip_class == GFX9 ? ",-promote-alloca" : "",
+            ctx->gfx_level == GFX9 ? ",-promote-alloca" : "",
             /* Wave32 is the default. */
-            ctx->chip_class >= GFX10 && ctx->wave_size == 64 ?
+            ctx->gfx_level >= GFX10 && ctx->wave_size == 64 ?
                ",+wavefrontsize64,-wavefrontsize32" : "");
 
    LLVMAddTargetDependentFunctionAttr(F, "target-features", features);

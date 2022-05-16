@@ -263,9 +263,6 @@ util_queue_thread_func(void *input)
 
       memset(mask, 0xff, sizeof(mask));
 
-      /* Ensure util_cpu_caps.num_cpu_mask_bits is initialized: */
-      util_cpu_detect();
-
       util_set_current_thread_affinity(mask, NULL,
                                        util_get_cpu_caps()->num_cpu_mask_bits);
    }
@@ -395,8 +392,10 @@ util_queue_adjust_num_threads(struct util_queue *queue, unsigned num_threads)
     */
    queue->num_threads = num_threads;
    for (unsigned i = old_num_threads; i < num_threads; i++) {
-      if (!util_queue_create_thread(queue, i))
+      if (!util_queue_create_thread(queue, i)) {
+         queue->num_threads = i;
          break;
+      }
    }
    simple_mtx_unlock(&queue->finish_lock);
 }
@@ -536,7 +535,7 @@ util_queue_destroy(struct util_queue *queue)
 {
    util_queue_kill_threads(queue, 0, false);
 
-   /* This makes it safe to call on a queue that failedutil_queue_init. */
+   /* This makes it safe to call on a queue that failed util_queue_init. */
    if (queue->head.next != NULL)
       remove_from_atexit_list(queue);
 
@@ -572,14 +571,15 @@ util_queue_add_job(struct util_queue *queue,
 
    assert(queue->num_queued >= 0 && queue->num_queued <= queue->max_jobs);
 
+   /* Scale the number of threads up if there's already one job waiting. */
+   if (queue->num_queued > 0 &&
+       queue->flags & UTIL_QUEUE_INIT_SCALE_THREADS &&
+       execute != util_queue_finish_execute &&
+       queue->num_threads < queue->max_threads) {
+      util_queue_adjust_num_threads(queue, queue->num_threads + 1);
+   }
 
    if (queue->num_queued == queue->max_jobs) {
-      if ((queue->flags & UTIL_QUEUE_INIT_SCALE_THREADS) &&
-          execute != util_queue_finish_execute &&
-          queue->num_threads < queue->max_threads) {
-         util_queue_adjust_num_threads(queue, queue->num_threads + 1);
-      }
-
       if (queue->flags & UTIL_QUEUE_INIT_RESIZE_IF_FULL &&
           queue->total_jobs_size + job_size < S_256MB) {
          /* If the queue is full, make it larger to avoid waiting for a free

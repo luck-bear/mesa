@@ -74,6 +74,7 @@ d3d12_context_destroy(struct pipe_context *pctx)
    if (ctx->timestamp_query)
       pctx->destroy_query(pctx, ctx->timestamp_query);
 
+   util_unreference_framebuffer_state(&ctx->fb);
    util_blitter_destroy(ctx->blitter);
    d3d12_end_batch(ctx, d3d12_current_batch(ctx));
    for (unsigned i = 0; i < ARRAY_SIZE(ctx->batches); ++i)
@@ -89,6 +90,9 @@ d3d12_context_destroy(struct pipe_context *pctx)
    d3d12_root_signature_cache_destroy(ctx);
    d3d12_cmd_signature_cache_destroy(ctx);
    d3d12_compute_transform_cache_destroy(ctx);
+   pipe_resource_reference(&ctx->pstipple.texture, nullptr);
+   pipe_sampler_view_reference(&ctx->pstipple.sampler_view, nullptr);
+   FREE(ctx->pstipple.sampler_cso);
 
    u_suballocator_destroy(&ctx->query_allocator);
 
@@ -1888,7 +1892,7 @@ d3d12_disable_fake_so_buffers(struct d3d12_context *ctx)
       cbuf.buffer = fake_target->fill_buffer;
       cbuf.buffer_offset = fake_target->fill_buffer_offset;
       cbuf.buffer_size = fake_target->fill_buffer->width0 - cbuf.buffer_offset;
-      ctx->base.set_constant_buffer(&ctx->base, PIPE_SHADER_COMPUTE, 1, true, &cbuf);
+      ctx->base.set_constant_buffer(&ctx->base, PIPE_SHADER_COMPUTE, 1, false, &cbuf);
 
       grid.indirect = fake_target->fill_buffer;
       grid.indirect_offset = fake_target->fill_buffer_offset + 4;
@@ -2355,10 +2359,34 @@ d3d12_set_tess_state(struct pipe_context *pctx,
    memcpy(ctx->default_inner_tess_factor, default_inner_level, sizeof(ctx->default_inner_tess_factor));
 }
 
+static enum pipe_reset_status
+d3d12_get_reset_status(struct pipe_context *pctx)
+{
+   struct d3d12_screen *screen = d3d12_screen(pctx->screen);
+   HRESULT hr = screen->dev->GetDeviceRemovedReason();
+   switch (hr) {
+   case DXGI_ERROR_DEVICE_HUNG:
+   case DXGI_ERROR_INVALID_CALL:
+      return PIPE_GUILTY_CONTEXT_RESET;
+   case DXGI_ERROR_DEVICE_RESET:
+      return PIPE_INNOCENT_CONTEXT_RESET;
+   default:
+      return SUCCEEDED(hr) ? PIPE_NO_RESET : PIPE_UNKNOWN_CONTEXT_RESET;
+   }
+}
+
 struct pipe_context *
 d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 {
    struct d3d12_screen *screen = d3d12_screen(pscreen);
+   if (FAILED(screen->dev->GetDeviceRemovedReason())) {
+      /* Attempt recovery, but this may fail */
+      screen->deinit(screen);
+      if (!screen->init(screen)) {
+         debug_printf("D3D12: failed to reset screen\n");
+         return nullptr;
+      }
+   }
 
    struct d3d12_context *ctx = CALLOC_STRUCT(d3d12_context);
    if (!ctx)
@@ -2451,6 +2479,8 @@ d3d12_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.memory_barrier = d3d12_memory_barrier;
 
    ctx->base.get_sample_position = d3d12_get_sample_position;
+
+   ctx->base.get_device_reset_status = d3d12_get_reset_status;
 
    ctx->gfx_pipeline_state.sample_mask = ~0;
 

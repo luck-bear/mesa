@@ -408,7 +408,7 @@ ir3_nir_analyze_ubo_ranges(nir_shader *nir, struct ir3_shader_variant *v)
 {
    struct ir3_const_state *const_state = ir3_const_state(v);
    struct ir3_ubo_analysis_state *state = &const_state->ubo_state;
-   struct ir3_compiler *compiler = v->shader->compiler;
+   struct ir3_compiler *compiler = v->compiler;
 
    /* Limit our uploads to the amount of constant buffer space available in
     * the hardware, minus what the shader compiler may need for various
@@ -449,7 +449,7 @@ ir3_nir_analyze_ubo_ranges(nir_shader *nir, struct ir3_shader_variant *v)
     * first.
     */
 
-   uint32_t offset = v->shader->num_reserved_user_consts * 16;
+   uint32_t offset = v->num_reserved_user_consts * 16;
    for (uint32_t i = 0; i < state->num_enabled; i++) {
       uint32_t range_size = state->range[i].end - state->range[i].start;
 
@@ -458,13 +458,13 @@ ir3_nir_analyze_ubo_ranges(nir_shader *nir, struct ir3_shader_variant *v)
       assert(offset <= max_upload);
       offset += range_size;
    }
-   state->size = offset - v->shader->num_reserved_user_consts * 16;
+   state->size = offset - v->num_reserved_user_consts * 16;
 }
 
 bool
 ir3_nir_lower_ubo_loads(nir_shader *nir, struct ir3_shader_variant *v)
 {
-   struct ir3_compiler *compiler = v->shader->compiler;
+   struct ir3_compiler *compiler = v->compiler;
    /* For the binning pass variant, we re-use the corresponding draw-pass
     * variants const_state and ubo state.  To make these clear, in this
     * pass it is const (read-only)
@@ -621,7 +621,7 @@ ir3_nir_lower_load_const_instr(nir_builder *b, nir_instr *in_instr, void *data)
 
    if (nir_dest_bit_size(instr->dest) == 16) {
       result = nir_bitcast_vector(b, result, 16);
-      result = nir_channels(b, result, BITSET_MASK(instr->num_components));
+      result = nir_trim_vector(b, result, instr->num_components);
    }
 
    return result;
@@ -650,7 +650,7 @@ ir3_nir_lower_load_constant(nir_shader *nir, struct ir3_shader_variant *v)
       const_state);
 
    if (progress) {
-      struct ir3_compiler *compiler = v->shader->compiler;
+      struct ir3_compiler *compiler = v->compiler;
 
       /* Save a copy of the NIR constant data to the variant for
        * inclusion in the final assembly.

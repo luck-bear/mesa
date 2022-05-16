@@ -105,7 +105,6 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         bool has_heap = dev->kernel_version->version_major > 1 ||
                         dev->kernel_version->version_minor >= 1;
 
-        /* Bifrost is WIP */
         switch (param) {
         case PIPE_CAP_NPOT_TEXTURES:
         case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
@@ -122,6 +121,7 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
         case PIPE_CAP_FRAMEBUFFER_NO_ATTACHMENT:
         case PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION:
+        case PIPE_CAP_SHADER_PACK_HALF_FLOAT:
                 return 1;
 
         case PIPE_CAP_MAX_RENDER_TARGETS:
@@ -382,7 +382,7 @@ panfrost_get_shader_param(struct pipe_screen *screen,
                 STATIC_ASSERT(PAN_MAX_CONST_BUFFERS < 0x100);
                 return PAN_MAX_CONST_BUFFERS;
 
-        case PIPE_SHADER_CAP_TGSI_CONT_SUPPORTED:
+        case PIPE_SHADER_CAP_CONT_SUPPORTED:
                 return 0;
 
         case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
@@ -421,10 +421,9 @@ panfrost_get_shader_param(struct pipe_screen *screen,
                 return pan_is_bifrost(dev) && !is_nofp16 && is_deqp;
 
         case PIPE_SHADER_CAP_INT64_ATOMICS:
-        case PIPE_SHADER_CAP_TGSI_DROUND_SUPPORTED:
-        case PIPE_SHADER_CAP_TGSI_DFRACEXP_DLDEXP_SUPPORTED:
-        case PIPE_SHADER_CAP_TGSI_LDEXP_SUPPORTED:
-        case PIPE_SHADER_CAP_TGSI_FMA_SUPPORTED:
+        case PIPE_SHADER_CAP_DROUND_SUPPORTED:
+        case PIPE_SHADER_CAP_DFRACEXP_DLDEXP_SUPPORTED:
+        case PIPE_SHADER_CAP_LDEXP_SUPPORTED:
         case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
                 return 0;
 
@@ -451,8 +450,6 @@ panfrost_get_shader_param(struct pipe_screen *screen,
         case PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT:
         case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
         case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
-        case PIPE_SHADER_CAP_TGSI_SKIP_MERGE_REGISTERS:
-        case PIPE_SHADER_CAP_LOWER_IF_THRESHOLD:
                 return 0;
 
         default:
@@ -907,6 +904,8 @@ panfrost_create_screen(int fd, struct renderonly *ro)
                 panfrost_cmdstream_screen_init_v6(screen);
         else if (dev->arch == 7)
                 panfrost_cmdstream_screen_init_v7(screen);
+        else if (dev->arch == 9)
+                panfrost_cmdstream_screen_init_v9(screen);
         else
                 unreachable("Unhandled architecture major");
 

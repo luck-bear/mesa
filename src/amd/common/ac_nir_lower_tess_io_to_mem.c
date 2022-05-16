@@ -121,7 +121,7 @@
 
 typedef struct {
    /* Which hardware generation we're dealing with */
-   enum chip_class chip_class;
+   enum amd_gfx_level gfx_level;
 
    /* True if merged VS+TCS (on GFX9+) has the same number
     * of input and output patch size.
@@ -151,6 +151,10 @@ typedef struct {
    unsigned tcs_tess_lvl_in_loc;
    unsigned tcs_tess_lvl_out_loc;
 
+   /* True if the output patch fits the subgroup, so all TCS outputs are always written in the same
+    * subgroup that reads them.
+    */
+   bool tcs_out_patch_fits_subgroup;
 } lower_tess_io_state;
 
 static bool
@@ -433,7 +437,7 @@ lower_hs_output_load(nir_builder *b,
 }
 
 static void
-update_hs_scoped_barrier(nir_intrinsic_instr *intrin)
+update_hs_scoped_barrier(nir_intrinsic_instr *intrin, lower_tess_io_state *st)
 {
    /* Output loads and stores are lowered to shared memory access,
     * so we have to update the barriers to also reflect this.
@@ -442,6 +446,14 @@ update_hs_scoped_barrier(nir_intrinsic_instr *intrin)
    if (mem_modes & nir_var_shader_out)
       mem_modes |= nir_var_mem_shared;
    nir_intrinsic_set_memory_modes(intrin, mem_modes);
+
+   nir_scope exec_scope = nir_intrinsic_execution_scope(intrin);
+   if (exec_scope == NIR_SCOPE_WORKGROUP && st->tcs_out_patch_fits_subgroup)
+      nir_intrinsic_set_execution_scope(intrin, NIR_SCOPE_SUBGROUP);
+
+   nir_scope mem_scope = nir_intrinsic_memory_scope(intrin);
+   if (mem_scope == NIR_SCOPE_WORKGROUP && st->tcs_out_patch_fits_subgroup)
+      nir_intrinsic_set_memory_scope(intrin, NIR_SCOPE_SUBGROUP);
 }
 
 static nir_ssa_def *
@@ -460,7 +472,7 @@ lower_hs_output_access(nir_builder *b,
               intrin->intrinsic == nir_intrinsic_load_per_vertex_output) {
       return lower_hs_output_load(b, intrin, st);
    } else if (intrin->intrinsic == nir_intrinsic_scoped_barrier) {
-      update_hs_scoped_barrier(intrin);
+      update_hs_scoped_barrier(intrin, st);
       return NIR_LOWER_INSTR_PROGRESS;
    } else {
       unreachable("intrinsic not supported by lower_hs_output_access");
@@ -504,8 +516,10 @@ hs_emit_write_tess_factors(nir_shader *shader,
    nir_builder_init(b, impl);
    b->cursor = nir_after_block(last_block);
 
-   nir_scoped_barrier(b, .execution_scope=NIR_SCOPE_WORKGROUP, .memory_scope=NIR_SCOPE_WORKGROUP,
-                         .memory_semantics=NIR_MEMORY_ACQ_REL, .memory_modes=nir_var_mem_shared);
+   nir_scope scope =
+      st->tcs_out_patch_fits_subgroup ? NIR_SCOPE_SUBGROUP : NIR_SCOPE_WORKGROUP;
+   nir_scoped_barrier(b, .execution_scope = scope, .memory_scope = scope,
+                      .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_shared);
 
    nir_ssa_def *invocation_id = nir_load_invocation_id(b);
 
@@ -531,7 +545,7 @@ hs_emit_write_tess_factors(nir_shader *shader,
    nir_ssa_def *tess_factors_offset = nir_imul_imm(b, rel_patch_id, (inner_comps + outer_comps) * 4u);
    unsigned tess_factors_const_offset = 0;
 
-   if (st->chip_class <= GFX8) {
+   if (st->gfx_level <= GFX8) {
       /* Store the dynamic HS control word. */
       nir_if *rel_patch_id_zero = nir_push_if(b, nir_ieq_imm(b, rel_patch_id, 0));
       nir_ssa_def *ctrlw = nir_imm_int(b, 0x80000000u);
@@ -657,7 +671,7 @@ ac_nir_lower_hs_inputs_to_mem(nir_shader *shader,
 
 void
 ac_nir_lower_hs_outputs_to_mem(nir_shader *shader,
-                               enum chip_class chip_class,
+                               enum amd_gfx_level gfx_level,
                                bool tes_reads_tessfactors,
                                uint64_t tes_inputs_read,
                                uint64_t tes_patch_inputs_read,
@@ -669,13 +683,14 @@ ac_nir_lower_hs_outputs_to_mem(nir_shader *shader,
    assert(shader->info.stage == MESA_SHADER_TESS_CTRL);
 
    lower_tess_io_state state = {
-      .chip_class = chip_class,
+      .gfx_level = gfx_level,
       .tes_reads_tessfactors = tes_reads_tessfactors,
       .tes_inputs_read = tes_inputs_read,
       .tes_patch_inputs_read = tes_patch_inputs_read,
       .tcs_num_reserved_inputs = num_reserved_tcs_inputs,
       .tcs_num_reserved_outputs = num_reserved_tcs_outputs,
       .tcs_num_reserved_patch_outputs = num_reserved_tcs_patch_outputs,
+      .tcs_out_patch_fits_subgroup = 32 % shader->info.tess.tcs_vertices_out == 0,
    };
 
    nir_shader_lower_instructions(shader,
@@ -703,60 +718,4 @@ ac_nir_lower_tes_inputs_to_mem(nir_shader *shader,
                                  filter_any_input_access,
                                  lower_tes_input_load,
                                  &state);
-}
-
-typedef struct
-{
-   unsigned patch_vtx_in;
-   unsigned tcs_num_patches;
-   unsigned options;
-} lower_tess_to_const_state;
-
-static bool
-filter_const_lowerable_tess_intrinsics(const nir_instr *instr,
-                                       const void *state)
-{
-   if (instr->type != nir_instr_type_intrinsic)
-      return false;
-
-   lower_tess_to_const_state *st = (lower_tess_to_const_state *) state;
-   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
-   return ((st->options & ac_nir_lower_patch_vtx_in) && intrin->intrinsic == nir_intrinsic_load_patch_vertices_in) ||
-          ((st->options & ac_nir_lower_num_patches) && intrin->intrinsic == nir_intrinsic_load_tcs_num_patches_amd);
-}
-
-static nir_ssa_def *
-lower_tess_intrinsics_to_const(nir_builder *b,
-                               nir_instr *instr,
-                               void *state)
-{
-   lower_tess_to_const_state *st = (lower_tess_to_const_state *) state;
-   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
-
-   switch (intrin->intrinsic) {
-   case nir_intrinsic_load_patch_vertices_in:
-      return nir_imm_int(b, st->patch_vtx_in);
-   case nir_intrinsic_load_tcs_num_patches_amd:
-      return nir_imm_int(b, st->tcs_num_patches);
-   default:
-      unreachable("Unsupported tess intrinsic.");
-   }
-}
-
-void
-ac_nir_lower_tess_to_const(nir_shader *shader,
-                           unsigned patch_vtx_in,
-                           unsigned tcs_num_patches,
-                           unsigned options)
-{
-   lower_tess_to_const_state st = {
-      .patch_vtx_in = patch_vtx_in,
-      .tcs_num_patches = tcs_num_patches,
-      .options = options,
-   };
-
-   nir_shader_lower_instructions(shader,
-                                 filter_const_lowerable_tess_intrinsics,
-                                 lower_tess_intrinsics_to_const,
-                                 &st);
 }

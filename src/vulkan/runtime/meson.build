@@ -54,6 +54,8 @@ vulkan_runtime_files = files(
   'vk_nir.h',
   'vk_object.c',
   'vk_object.h',
+  'vk_pipeline_cache.c',
+  'vk_pipeline_cache.h',
   'vk_physical_device.c',
   'vk_physical_device.h',
   'vk_queue.c',
@@ -77,7 +79,7 @@ vulkan_runtime_files = files(
 vulkan_runtime_deps = [
   vulkan_wsi_deps,
   idep_mesautil,
-  idep_nir_headers,
+  idep_nir,
   idep_vulkan_util,
 ]
 
@@ -156,7 +158,7 @@ libvulkan_runtime = static_library(
   dependencies : vulkan_runtime_deps,
   # For glsl_type_singleton
   link_with : libcompiler,
-  c_args : [vulkan_wsi_args],
+  c_args : [c_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,
 )

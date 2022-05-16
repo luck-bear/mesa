@@ -168,8 +168,10 @@ d3d12_process_batch_residency(struct d3d12_screen *screen, struct d3d12_batch *b
    evict_aged_allocations(screen, completed_fence_value, current_time, grace_period);
 
    /* If there's nothing needing to be made newly resident, we're done once we've trimmed */
-   if (base_bo_set->entries == 0)
+   if (base_bo_set->entries == 0) {
+      _mesa_set_destroy(base_bo_set, nullptr);
       return;
+   }
 
    uint64_t residency_fence_value_snapshot = screen->residency_fence_value;
 
@@ -248,4 +250,13 @@ d3d12_init_residency(struct d3d12_screen *screen)
       return false;
 
    return true;
+}
+
+void
+d3d12_deinit_residency(struct d3d12_screen *screen)
+{
+   if (screen->residency_fence) {
+      screen->residency_fence->Release();
+      screen->residency_fence = nullptr;
+   }
 }

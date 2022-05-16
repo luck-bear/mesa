@@ -29,7 +29,7 @@
 
 #define ZINK_DEFAULT_MAX_DESCS 5000
 #define ZINK_DEFAULT_DESC_CLAMP (ZINK_DEFAULT_MAX_DESCS * 0.9)
-
+#define ZINK_MAX_SHADER_IMAGES 32
 #define ZINK_MAX_BINDLESS_HANDLES 1024
 
 #include "zink_clear.h"
@@ -197,7 +197,6 @@ struct zink_context {
 
    struct pipe_device_reset_callback reset;
 
-   simple_mtx_t batch_mtx;
    struct zink_fence *deferred_fence;
    struct zink_fence *last_fence; //the last command buffer submitted
    struct zink_batch_state *batch_states; //list of submitted batch states: ordered by increasing timeline id
@@ -213,11 +212,9 @@ struct zink_context {
    struct pipe_constant_buffer ubos[PIPE_SHADER_TYPES][PIPE_MAX_CONSTANT_BUFFERS];
    struct pipe_shader_buffer ssbos[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_BUFFERS];
    uint32_t writable_ssbos[PIPE_SHADER_TYPES];
-   struct zink_image_view image_views[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_IMAGES];
+   struct zink_image_view image_views[PIPE_SHADER_TYPES][ZINK_MAX_SHADER_IMAGES];
 
    struct pipe_framebuffer_state fb_state;
-   struct zink_framebuffer *(*get_framebuffer)(struct zink_context*);
-   void (*init_framebuffer)(struct zink_screen *screen, struct zink_framebuffer *fb, struct zink_render_pass *rp);
    struct hash_table framebuffer_cache;
 
    struct zink_vertex_elements_state *element_state;
@@ -291,6 +288,8 @@ struct zink_context {
       float tess_levels[6];
    };
 
+   struct zink_vk_query *curr_xfb_queries[PIPE_MAX_VERTEX_STREAMS];
+
    struct list_head query_pools;
    struct list_head suspended_queries;
    struct list_head primitives_generated_queries;
@@ -327,15 +326,15 @@ struct zink_context {
       uint8_t num_samplers[PIPE_SHADER_TYPES];
       uint8_t num_sampler_views[PIPE_SHADER_TYPES];
 
-      VkDescriptorImageInfo images[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_IMAGES];
-      VkBufferView texel_images[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_IMAGES];
+      VkDescriptorImageInfo images[PIPE_SHADER_TYPES][ZINK_MAX_SHADER_IMAGES];
+      VkBufferView texel_images[PIPE_SHADER_TYPES][ZINK_MAX_SHADER_IMAGES];
       uint8_t num_images[PIPE_SHADER_TYPES];
 
       VkDescriptorImageInfo fbfetch;
 
       struct zink_resource *descriptor_res[ZINK_DESCRIPTOR_TYPES][PIPE_SHADER_TYPES][PIPE_MAX_SAMPLERS];
       struct zink_descriptor_surface sampler_surfaces[PIPE_SHADER_TYPES][PIPE_MAX_SAMPLERS];
-      struct zink_descriptor_surface image_surfaces[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_IMAGES];
+      struct zink_descriptor_surface image_surfaces[PIPE_SHADER_TYPES][ZINK_MAX_SHADER_IMAGES];
 
       struct {
          struct util_idalloc tex_slots;
@@ -361,9 +360,7 @@ struct zink_context {
    uint32_t num_so_targets;
    struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_OUTPUTS];
    bool dirty_so_targets;
-   bool xfb_barrier;
    bool first_frame_done;
-   bool have_timelines;
 
    bool gfx_dirty;
 
@@ -398,7 +395,7 @@ void
 zink_wait_on_batch(struct zink_context *ctx, uint32_t batch_id);
 
 bool
-zink_check_batch_completion(struct zink_context *ctx, uint32_t batch_id, bool have_lock);
+zink_check_batch_completion(struct zink_context *ctx, uint32_t batch_id);
 
 void
 zink_flush_queue(struct zink_context *ctx);

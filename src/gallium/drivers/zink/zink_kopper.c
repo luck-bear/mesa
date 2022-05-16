@@ -46,9 +46,21 @@ init_dt_type(struct kopper_displaytarget *cdt)
        cdt->type = KOPPER_WAYLAND;
        break;
 #endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    case VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR:
+       cdt->type = KOPPER_WIN32;
+       break;
+#endif
     default:
        unreachable("unsupported!");
     }
+#ifdef WIN32
+    // not hooked up yet so let's not sabotage benchmarks
+    cdt->present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+#else
+    // Matches the EGL and GLX_SGI_swap_interval default
+    cdt->present_mode = VK_PRESENT_MODE_FIFO_KHR;
+#endif
 }
 
 static VkSurfaceKHR
@@ -70,6 +82,11 @@ kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cd
        error = VKSCR(CreateWaylandSurfaceKHR)(screen->instance, &cdt->info.wl, NULL, &surface);
        break;
 #endif
+ #ifdef VK_USE_PLATFORM_WIN32_KHR
+    case VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR:
+       error = VKSCR(CreateWin32SurfaceKHR)(screen->instance, &cdt->info.win32, NULL, &surface);
+       break;
+#endif
     default:
        unreachable("unsupported!");
     }
@@ -79,12 +96,28 @@ kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cd
 
     VkBool32 supported;
     error = VKSCR(GetPhysicalDeviceSurfaceSupportKHR)(screen->pdev, screen->gfx_queue, surface, &supported);
-    if (!zink_screen_handle_vkresult(screen, error) || !supported) {
-       VKSCR(DestroySurfaceKHR)(screen->instance, surface, NULL);
-       return VK_NULL_HANDLE;
+    if (!zink_screen_handle_vkresult(screen, error) || !supported)
+       goto fail;
+
+    unsigned count = 10;
+    VkPresentModeKHR modes[10];
+    error = VKSCR(GetPhysicalDeviceSurfacePresentModesKHR)(screen->pdev, surface, &count, modes);
+    if (!zink_screen_handle_vkresult(screen, error))
+       goto fail;
+
+    for (unsigned i = 0; i < count; i++) {
+       /* VK_PRESENT_MODE_SHARED_DEMAND_REFRESH_KHR and VK_PRESENT_MODE_SHARED_CONTINUOUS_REFRESH_KHR
+        * are not handled
+        */
+       assert(modes[i] <= VK_PRESENT_MODE_FIFO_RELAXED_KHR);
+       if (modes[i] <= VK_PRESENT_MODE_FIFO_RELAXED_KHR)
+          cdt->present_modes |= BITFIELD_BIT(modes[i]);
     }
 
     return surface;
+fail:
+   VKSCR(DestroySurfaceKHR)(screen->instance, surface, NULL);
+   return VK_NULL_HANDLE;
 }
 
 static void
@@ -125,6 +158,11 @@ find_dt_entry(struct zink_screen *screen, const struct kopper_displaytarget *cdt
       he = _mesa_hash_table_search(&screen->dts, cdt->info.wl.surface);
       break;
 #endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   case KOPPER_WIN32:
+      he = _mesa_hash_table_search(&screen->dts, cdt->info.win32.hwnd);
+      break;
+#endif
    default:
       unreachable("unsupported!");
    }
@@ -148,6 +186,7 @@ zink_kopper_deinit_displaytarget(struct zink_screen *screen, struct kopper_displ
    VKSCR(DestroySurfaceKHR)(screen->instance, cdt->surface, NULL);
    cdt->swapchain = cdt->old_swapchain = NULL;
    cdt->surface = VK_NULL_HANDLE;
+   util_queue_fence_destroy(&cdt->present_fence);
 }
 
 static struct kopper_swapchain *
@@ -180,10 +219,9 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
       cswap->scci.queueFamilyIndexCount = 0;
       cswap->scci.pQueueFamilyIndices = NULL;
       cswap->scci.compositeAlpha = has_alpha ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-      // TODO: This is where you'd hook up GLX_EXT_swap_interval and friends
-      cswap->scci.presentMode = cdt->type == KOPPER_X11 ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
       cswap->scci.clipped = VK_TRUE;
    }
+   cswap->scci.presentMode = cdt->present_mode;
    cswap->scci.minImageCount = cdt->caps.minImageCount;
    cswap->scci.preTransform = cdt->caps.currentTransform;
    if (cdt->formats[1])
@@ -192,6 +230,7 @@ kopper_CreateSwapchain(struct zink_screen *screen, struct kopper_displaytarget *
    /* different display platforms have, by vulkan spec, different sizing methodologies */
    switch (cdt->type) {
    case KOPPER_X11:
+   case KOPPER_WIN32:
       /* With Xcb, minImageExtent, maxImageExtent, and currentExtent must always equal the window size.
        * ...
        * Due to above restrictions, it is only possible to create a new swapchain on this
@@ -298,6 +337,7 @@ zink_kopper_displaytarget_create(struct zink_screen *screen, unsigned tex_usage,
             _mesa_hash_table_init(&screen->dts, screen, NULL, _mesa_key_pointer_equal);
             break;
          case KOPPER_WAYLAND:
+         case KOPPER_WIN32:
             _mesa_hash_table_init(&screen->dts, screen, _mesa_hash_pointer, _mesa_key_pointer_equal);
             break;
          default:
@@ -322,6 +362,7 @@ zink_kopper_displaytarget_create(struct zink_screen *screen, unsigned tex_usage,
    cdt->refcount = 1;
    cdt->loader_private = (void*)loader_private;
    cdt->info = *info;
+   util_queue_fence_init(&cdt->present_fence);
 
    enum pipe_format srgb = PIPE_FORMAT_NONE;
    if (screen->info.have_KHR_swapchain_mutable_format) {
@@ -357,6 +398,11 @@ zink_kopper_displaytarget_create(struct zink_screen *screen, unsigned tex_usage,
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
    case KOPPER_WAYLAND:
       _mesa_hash_table_insert(&screen->dts, cdt->info.wl.surface, cdt);
+      break;
+#endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+   case KOPPER_WIN32:
+      _mesa_hash_table_insert(&screen->dts, cdt->info.win32.hwnd, cdt);
       break;
 #endif
    default:
@@ -403,7 +449,7 @@ kopper_acquire(struct zink_screen *screen, struct zink_resource *res, uint64_t t
       }
       if (timeout == UINT64_MAX && util_queue_is_initialized(&screen->flush_queue) &&
           p_atomic_read_relaxed(&cdt->swapchain->num_acquires) > cdt->swapchain->max_acquires) {
-         util_queue_fence_wait(&res->obj->present_fence);
+         util_queue_fence_wait(&cdt->present_fence);
       }
       VkSemaphoreCreateInfo sci = {
          VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
@@ -456,6 +502,7 @@ kill_swapchain(struct zink_context *ctx, struct zink_resource *res)
    zink_batch_reference_resource(&ctx->batch, res);
    struct pipe_resource *pres = screen->base.resource_create(&screen->base, &res->base.b);
    zink_resource_object_reference(screen, &res->obj, zink_resource(pres)->obj);
+   res->layout = VK_IMAGE_LAYOUT_UNDEFINED;
    pipe_resource_reference(&pres, NULL);
 }
 
@@ -471,19 +518,29 @@ is_swapchain_kill(VkResult ret)
 bool
 zink_kopper_acquire(struct zink_context *ctx, struct zink_resource *res, uint64_t timeout)
 {
-   assert(res->obj->dt);
+   assert(zink_is_swapchain(res));
    struct kopper_displaytarget *cdt = kopper_displaytarget(res->obj->dt);
+   if (!cdt)
+      /* dead swapchain */
+      return false;
+   if (cdt->is_kill) {
+      kill_swapchain(ctx, res);
+      return false;
+   }
    const struct kopper_swapchain *cswap = cdt->swapchain;
    res->obj->new_dt |= res->base.b.width0 != cswap->scci.imageExtent.width ||
                        res->base.b.height0 != cswap->scci.imageExtent.height;
    VkResult ret = kopper_acquire(zink_screen(ctx->base.screen), res, timeout);
    if (ret == VK_SUCCESS || ret == VK_SUBOPTIMAL_KHR) {
-      if (cswap != cdt->swapchain)
+      if (cswap != cdt->swapchain) {
          ctx->swapchain_size = cdt->swapchain->scci.imageExtent;
+         res->base.b.width0 = ctx->swapchain_size.width;
+         res->base.b.height0 = ctx->swapchain_size.height;
+      }
    } else if (is_swapchain_kill(ret)) {
       kill_swapchain(ctx, res);
    }
-   return ret;
+   return !is_swapchain_kill(ret);
 }
 
 VkSemaphore
@@ -600,7 +657,7 @@ zink_kopper_present_queue(struct zink_screen *screen, struct zink_resource *res)
    cpi->info.pResults = NULL;
    res->obj->present = VK_NULL_HANDLE;
    if (util_queue_is_initialized(&screen->flush_queue)) {
-      util_queue_add_job(&screen->flush_queue, cpi, &res->obj->present_fence,
+      util_queue_add_job(&screen->flush_queue, cpi, &cdt->present_fence,
                          kopper_present, NULL, 0);
    } else {
       kopper_present(cpi, screen, 0);
@@ -640,8 +697,11 @@ zink_kopper_acquire_readback(struct zink_context *ctx, struct zink_resource *res
          return false;
       }
    }
-   if (cswap != cdt->swapchain)
+   if (cswap != cdt->swapchain) {
       ctx->swapchain_size = cdt->swapchain->scci.imageExtent;
+      res->base.b.width0 = ctx->swapchain_size.width;
+      res->base.b.height0 = ctx->swapchain_size.height;
+   }
    return true;
 }
 
@@ -681,7 +741,9 @@ zink_kopper_update(struct pipe_screen *pscreen, struct pipe_resource *pres, int 
 {
    struct zink_resource *res = zink_resource(pres);
    struct zink_screen *screen = zink_screen(pscreen);
-   assert(res->obj->dt);
+   assert(pres->bind & PIPE_BIND_DISPLAY_TARGET);
+   if (!res->obj->dt)
+      return false;
    struct kopper_displaytarget *cdt = kopper_displaytarget(res->obj->dt);
    if (cdt->type != KOPPER_X11) {
       *w = res->base.b.width0;
@@ -689,10 +751,89 @@ zink_kopper_update(struct pipe_screen *pscreen, struct pipe_resource *pres, int 
       return true;
    }
    if (update_caps(screen, cdt) != VK_SUCCESS) {
-      debug_printf("zink: failed to update swapchain capabilities");
+      mesa_loge("zink: failed to update swapchain capabilities");
+      cdt->is_kill = true;
       return false;
    }
    *w = cdt->caps.currentExtent.width;
    *h = cdt->caps.currentExtent.height;
    return true;
+}
+
+bool
+zink_kopper_is_cpu(const struct pipe_screen *pscreen)
+{
+   const struct zink_screen *screen = (const struct zink_screen*)pscreen;
+   return screen->is_cpu;
+}
+
+void
+zink_kopper_fixup_depth_buffer(struct zink_context *ctx)
+{
+   struct zink_screen *screen = zink_screen(ctx->base.screen);
+   if (!ctx->fb_state.zsbuf)
+      return;
+
+   assert(ctx->fb_state.zsbuf->texture->bind & PIPE_BIND_DISPLAY_TARGET);
+
+   struct zink_resource *res = zink_resource(ctx->fb_state.zsbuf->texture);
+   struct zink_surface *surf = zink_csurface(ctx->fb_state.zsbuf);
+   struct zink_ctx_surface *csurf = (struct zink_ctx_surface*)ctx->fb_state.zsbuf;
+   if (surf->info.width == ctx->fb_state.width &&
+       surf->info.height == ctx->fb_state.height)
+      return;
+
+   struct pipe_resource templ = *ctx->fb_state.zsbuf->texture;
+   templ.width0 = ctx->fb_state.width;
+   templ.height0 = ctx->fb_state.height;
+   struct pipe_resource *pz = screen->base.resource_create(&screen->base, &templ);
+   struct zink_resource *z = zink_resource(pz);
+   zink_resource_object_reference(screen, &res->obj, z->obj);
+   res->base.b.width0 = ctx->fb_state.width;
+   res->base.b.height0 = ctx->fb_state.height;
+   pipe_resource_reference(&pz, NULL);
+
+   ctx->fb_state.zsbuf->width = ctx->fb_state.width;
+   ctx->fb_state.zsbuf->height = ctx->fb_state.height;
+   struct pipe_surface *psurf = ctx->base.create_surface(&ctx->base, &res->base.b, ctx->fb_state.zsbuf);
+   struct zink_ctx_surface *cz = (struct zink_ctx_surface*)psurf;
+
+   /* oh god why */
+   zink_surface_reference(screen, &csurf->surf, cz->surf);
+   pipe_surface_release(&ctx->base, &psurf);
+}
+
+bool
+zink_kopper_check(struct pipe_resource *pres)
+{
+   struct zink_resource *res = zink_resource(pres);
+   assert(pres->bind & PIPE_BIND_DISPLAY_TARGET);
+   if (!res->obj->dt)
+      return false;
+   struct kopper_displaytarget *cdt = kopper_displaytarget(res->obj->dt);
+   return !cdt->is_kill;
+}
+
+void
+zink_kopper_set_swap_interval(struct pipe_screen *pscreen, struct pipe_resource *pres, int interval)
+{
+   struct zink_resource *res = zink_resource(pres);
+   struct zink_screen *screen = zink_screen(pscreen);
+   assert(res->obj->dt);
+   struct kopper_displaytarget *cdt = kopper_displaytarget(res->obj->dt);
+   VkPresentModeKHR old_present_mode = cdt->present_mode;
+
+   assert(interval >= 0); /* TODO: VK_PRESENT_MODE_FIFO_RELAXED_KHR */
+   if (interval == 0) {
+      if (cdt->present_modes & BITFIELD_BIT(VK_PRESENT_MODE_IMMEDIATE_KHR))
+         cdt->present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+      else
+         cdt->present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
+   } else if (interval > 0) {
+      cdt->present_mode = VK_PRESENT_MODE_FIFO_KHR;
+   }
+   assert(cdt->present_modes & BITFIELD_BIT(cdt->present_mode));
+
+   if (old_present_mode != cdt->present_mode)
+      update_swapchain(screen, cdt, cdt->caps.currentExtent.width, cdt->caps.currentExtent.height);
 }

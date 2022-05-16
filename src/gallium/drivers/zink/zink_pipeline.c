@@ -61,7 +61,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
       vertex_input_state.vertexBindingDescriptionCount = state->element_state->num_bindings;
       vertex_input_state.pVertexAttributeDescriptions = state->element_state->attribs;
       vertex_input_state.vertexAttributeDescriptionCount = state->element_state->num_attribs;
-      if (!screen->info.have_EXT_extended_dynamic_state) {
+      if (!screen->info.have_EXT_extended_dynamic_state || !state->uses_dynamic_stride) {
          for (int i = 0; i < state->element_state->num_bindings; ++i) {
             const unsigned buffer_id = binding_map[i];
             VkVertexInputBindingDescription *binding = &state->element_state->b.bindings[i];
@@ -86,12 +86,17 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
       switch (primitive_topology) {
       case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
       case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
-      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
       case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
       case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
+         if (screen->info.have_EXT_primitive_topology_list_restart) {
+            primitive_state.primitiveRestartEnable = state->dyn_state2.primitive_restart ? VK_TRUE : VK_FALSE;
+            break;
+         }
+         FALLTHROUGH;
       case VK_PRIMITIVE_TOPOLOGY_PATCH_LIST:
          if (state->dyn_state2.primitive_restart)
-            debug_printf("restart_index set with unsupported primitive topology %u\n", primitive_topology);
+            mesa_loge("zink: restart_index set with unsupported primitive topology %u\n", primitive_topology);
          primitive_state.primitiveRestartEnable = VK_FALSE;
          break;
       default:
@@ -227,7 +232,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
    if (state->element_state->num_attribs) {
       if (screen->info.have_EXT_vertex_input_dynamic_state)
          dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
-      else if (screen->info.have_EXT_extended_dynamic_state)
+      else if (screen->info.have_EXT_extended_dynamic_state && state->uses_dynamic_stride)
          dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE_EXT;
    }
    if (screen->info.have_EXT_extended_dynamic_state2) {
@@ -351,8 +356,8 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
    pci.stageCount = num_stages;
 
    VkPipeline pipeline;
-   if (vkCreateGraphicsPipelines(screen->dev, prog->base.pipeline_cache, 1, &pci,
-                                 NULL, &pipeline) != VK_SUCCESS) {
+   if (VKSCR(CreateGraphicsPipelines)(screen->dev, prog->base.pipeline_cache,
+                                      1, &pci, NULL, &pipeline) != VK_SUCCESS) {
       mesa_loge("ZINK: vkCreateGraphicsPipelines failed");
       return VK_NULL_HANDLE;
    }
@@ -392,8 +397,8 @@ zink_create_compute_pipeline(struct zink_screen *screen, struct zink_compute_pro
    pci.stage = stage;
 
    VkPipeline pipeline;
-   if (vkCreateComputePipelines(screen->dev, comp->base.pipeline_cache, 1, &pci,
-                                 NULL, &pipeline) != VK_SUCCESS) {
+   if (VKSCR(CreateComputePipelines)(screen->dev, comp->base.pipeline_cache,
+                                     1, &pci, NULL, &pipeline) != VK_SUCCESS) {
       mesa_loge("ZINK: vkCreateComputePipelines failed");
       return VK_NULL_HANDLE;
    }

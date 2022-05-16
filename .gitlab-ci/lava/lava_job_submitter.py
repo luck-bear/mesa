@@ -24,19 +24,28 @@
 
 """Send a job to LAVA, track it and collect log back"""
 
+
 import argparse
+import contextlib
 import pathlib
+import re
 import sys
 import time
 import traceback
 import urllib.parse
-import xmlrpc
-
+import xmlrpc.client
 from datetime import datetime, timedelta
 from os import getenv
+from typing import Any, Optional
 
 import lavacli
 import yaml
+from lava.exceptions import (
+    MesaCIException,
+    MesaCIParseException,
+    MesaCIRetryError,
+    MesaCITimeoutError,
+)
 from lavacli.utils import loader
 
 # Timeout in seconds to decide if the device from the dispatched LAVA job has
@@ -53,9 +62,18 @@ LOG_POLLING_TIME_SEC = int(getenv("LAVA_LOG_POLLING_TIME_SEC", 5))
 # How many retries should be made when a timeout happen.
 NUMBER_OF_RETRIES_TIMEOUT_DETECTION = int(getenv("LAVA_NUMBER_OF_RETRIES_TIMEOUT_DETECTION", 2))
 
+# How many attempts should be made when a timeout happen during LAVA device boot.
+NUMBER_OF_ATTEMPTS_LAVA_BOOT = int(getenv("LAVA_NUMBER_OF_ATTEMPTS_LAVA_BOOT", 3))
+
+# Helper constants to colorize the job output
+CONSOLE_LOG_COLOR_GREEN = "\x1b[1;32;5;197m"
+CONSOLE_LOG_COLOR_RED = "\x1b[1;38;5;197m"
+CONSOLE_LOG_COLOR_RESET = "\x1b[0m"
+
 
 def print_log(msg):
     print("{}: {}".format(datetime.now(), msg))
+
 
 def fatal_err(msg):
     print_log(msg)
@@ -76,9 +94,13 @@ def generate_lava_yaml(args):
         'context': {
             'extra_nfsroot_args': ' init=/init rootwait usbcore.quirks=0bda:8153:k'
         },
-        'timeouts': {
-            'job': {
-                'minutes': args.job_timeout
+        "timeouts": {
+            "job": {"minutes": args.job_timeout},
+            "action": {"minutes": 3},
+            "actions": {
+                "depthcharge-action": {
+                    "minutes": 3 * NUMBER_OF_ATTEMPTS_LAVA_BOOT,
+                }
             }
         },
     }
@@ -93,10 +115,10 @@ def generate_lava_yaml(args):
       'to': 'tftp',
       'os': 'oe',
       'kernel': {
-        'url': '{}/{}'.format(args.base_system_url_prefix, args.kernel_image_name),
+        'url': '{}/{}'.format(args.kernel_url_prefix, args.kernel_image_name),
       },
       'nfsrootfs': {
-        'url': '{}/lava-rootfs.tgz'.format(args.base_system_url_prefix),
+        'url': '{}/lava-rootfs.tgz'.format(args.rootfs_url_prefix),
         'compression': 'gz',
       }
     }
@@ -104,25 +126,27 @@ def generate_lava_yaml(args):
         deploy['kernel']['type'] = args.kernel_image_type
     if args.dtb:
         deploy['dtb'] = {
-          'url': '{}/{}.dtb'.format(args.base_system_url_prefix, args.dtb)
+          'url': '{}/{}.dtb'.format(args.kernel_url_prefix, args.dtb)
         }
 
     # always boot over NFS
     boot = {
-      'timeout': { 'minutes': 25 },
-      'method': args.boot_method,
-      'commands': 'nfs',
-      'prompts': ['lava-shell:'],
+        "failure_retry": NUMBER_OF_ATTEMPTS_LAVA_BOOT,
+        "method": args.boot_method,
+        "commands": "nfs",
+        "prompts": ["lava-shell:"],
     }
 
     # skeleton test definition: only declaring each job as a single 'test'
     # since LAVA's test parsing is not useful to us
+    run_steps = []
     test = {
       'timeout': { 'minutes': args.job_timeout },
       'failure_retry': 1,
       'definitions': [ {
         'name': 'mesa',
         'from': 'inline',
+        'lava-signal': 'kmsg',
         'path': 'inline/mesa.yaml',
         'repository': {
           'metadata': {
@@ -132,10 +156,8 @@ def generate_lava_yaml(args):
             'scope': [ 'functional' ],
             'format': 'Lava-Test Test Definition 1.0',
           },
-          'parse': {
-            'pattern': r'hwci: (?P<test_case_id>\S*):\s+(?P<result>(pass|fail))'
-          },
           'run': {
+            "steps": run_steps
           },
         },
       } ],
@@ -145,27 +167,33 @@ def generate_lava_yaml(args):
     #   - inline .gitlab-ci/common/init-stage1.sh
     #   - fetch and unpack per-pipeline build artifacts from build job
     #   - fetch and unpack per-job environment from lava-submit.sh
-    #   - exec .gitlab-ci/common/init-stage2.sh 
-    init_lines = []
+    #   - exec .gitlab-ci/common/init-stage2.sh
 
     with open(args.first_stage_init, 'r') as init_sh:
-      init_lines += [ x.rstrip() for x in init_sh if not x.startswith('#') and x.rstrip() ]
+      run_steps += [ x.rstrip() for x in init_sh if not x.startswith('#') and x.rstrip() ]
 
-    with open(args.jwt_file) as jwt_file:
-        init_lines += [
-            "set +x",
-            f'echo -n "{jwt_file.read()}" > "{args.jwt_file}"  # HIDEME',
-            "set -x",
+    if args.jwt_file:
+        with open(args.jwt_file) as jwt_file:
+            run_steps += [
+                "set +x",
+                f'echo -n "{jwt_file.read()}" > "{args.jwt_file}"  # HIDEME',
+                "set -x",
+                f'echo "export CI_JOB_JWT_FILE={args.jwt_file}" >> /set-job-env-vars.sh',
+            ]
+    else:
+        run_steps += [
+            "echo Could not find jwt file, disabling MINIO requests...",
+            "unset MINIO_RESULTS_UPLOAD",
         ]
 
-    init_lines += [
+    run_steps += [
       'mkdir -p {}'.format(args.ci_project_dir),
-      'wget -S --progress=dot:giga -O- {} | tar -xz -C {}'.format(args.mesa_build_url, args.ci_project_dir),
+      'wget -S --progress=dot:giga -O- {} | tar -xz -C {}'.format(args.build_url, args.ci_project_dir),
       'wget -S --progress=dot:giga -O- {} | tar -xz -C /'.format(args.job_rootfs_overlay_url),
-      f'echo "export CI_JOB_JWT_FILE={args.jwt_file}" >> /set-job-env-vars.sh',
-      'exec /init-stage2.sh',
+      # Putting CI_JOB name as the testcase name, it may help LAVA farm
+      # maintainers with monitoring
+      f"lava-test-case 'mesa-ci_{args.mesa_job_name}' --shell /init-stage2.sh",
     ]
-    test['definitions'][0]['repository']['run']['steps'] = init_lines
 
     values['actions'] = [
       { 'deploy': deploy },
@@ -211,143 +239,278 @@ def _call_proxy(fn, *args):
             fatal_err("FATAL: Fault: {} (code: {})".format(err.faultString, err.faultCode))
 
 
-def get_job_results(proxy, job_id, test_suite, test_case):
+class LAVAJob:
+    color_status_map = {"pass": CONSOLE_LOG_COLOR_GREEN}
+
+    def __init__(self, proxy, definition):
+        self.job_id = None
+        self.proxy = proxy
+        self.definition = definition
+        self.last_log_line = 0
+        self.last_log_time = None
+        self.is_finished = False
+        self.status = "created"
+
+    def heartbeat(self):
+        self.last_log_time = datetime.now()
+        self.status = "running"
+
+    def validate(self) -> Optional[dict]:
+        """Returns a dict with errors, if the validation fails.
+
+        Returns:
+            Optional[dict]: a dict with the validation errors, if any
+        """
+        return _call_proxy(self.proxy.scheduler.jobs.validate, self.definition, True)
+
+    def submit(self):
+        try:
+            self.job_id = _call_proxy(self.proxy.scheduler.jobs.submit, self.definition)
+        except MesaCIException:
+            return False
+        return True
+
+    def cancel(self):
+        if self.job_id:
+            self.proxy.scheduler.jobs.cancel(self.job_id)
+
+    def is_started(self) -> bool:
+        waiting_states = ["Submitted", "Scheduling", "Scheduled"]
+        job_state: dict[str, str] = _call_proxy(
+            self.proxy.scheduler.job_state, self.job_id
+        )
+        return job_state["job_state"] not in waiting_states
+
+    def _load_log_from_data(self, data) -> list[str]:
+        lines = []
+        # When there is no new log data, the YAML is empty
+        if loaded_lines := yaml.load(str(data), Loader=loader(False)):
+            lines = loaded_lines
+            # If we had non-empty log data, we can assure that the device is alive.
+            self.heartbeat()
+            self.last_log_line += len(lines)
+        return lines
+
+    def get_logs(self) -> list[str]:
+        try:
+            (finished, data) = _call_proxy(
+                self.proxy.scheduler.jobs.logs, self.job_id, self.last_log_line
+            )
+            self.is_finished = finished
+            return self._load_log_from_data(data)
+
+        except Exception as mesa_ci_err:
+            raise MesaCIParseException(
+                f"Could not get LAVA job logs. Reason: {mesa_ci_err}"
+            ) from mesa_ci_err
+
+    def parse_job_result_from_log(self, lava_lines: list[dict[str, str]]) -> None:
+        """Use the console log to catch if the job has completed successfully or
+        not.
+        Returns true only the job finished by looking into the log result
+        parsing.
+        """
+        log_lines = [l["msg"] for l in lava_lines if l["lvl"] == "target"]
+        for line in log_lines:
+            if result := re.search(r"hwci: mesa: (\S*)", line):
+                self.is_finished = True
+                self.status = result.group(1)
+                color = LAVAJob.color_status_map.get(self.status, CONSOLE_LOG_COLOR_RED)
+                print_log(
+                    f"{color}"
+                    f"LAVA Job finished with result: {self.status}"
+                    f"{CONSOLE_LOG_COLOR_RESET}"
+                )
+
+                # We reached the log end here. hwci script has finished.
+                break
+
+
+def find_exception_from_metadata(metadata, job_id):
+    if "result" not in metadata or metadata["result"] != "fail":
+        return
+    if "error_type" in metadata:
+        error_type = metadata["error_type"]
+        if error_type == "Infrastructure":
+            raise MesaCIException(
+                f"LAVA job {job_id} failed with Infrastructure Error. Retry."
+            )
+        if error_type == "Job":
+            # This happens when LAVA assumes that the job cannot terminate or
+            # with mal-formed job definitions. As we are always validating the
+            # jobs, only the former is probable to happen. E.g.: When some LAVA
+            # action timed out more times than expected in job definition.
+            raise MesaCIException(
+                f"LAVA job {job_id} failed with JobError "
+                "(possible LAVA timeout misconfiguration/bug). Retry."
+            )
+    if "case" in metadata and metadata["case"] == "validate":
+        raise MesaCIException(
+            f"LAVA job {job_id} failed validation (possible download error). Retry."
+        )
+    return metadata
+
+
+def find_lava_error(job) -> None:
     # Look for infrastructure errors and retry if we see them.
-    results_yaml = _call_proxy(proxy.results.get_testjob_results_yaml, job_id)
+    results_yaml = _call_proxy(job.proxy.results.get_testjob_results_yaml, job.job_id)
     results = yaml.load(results_yaml, Loader=loader(False))
     for res in results:
         metadata = res["metadata"]
-        if "result" not in metadata or metadata["result"] != "fail":
-            continue
-        if 'error_type' in metadata and metadata['error_type'] == "Infrastructure":
-            print_log("LAVA job {} failed with Infrastructure Error. Retry.".format(job_id))
-            return False
-        if 'case' in metadata and metadata['case'] == "validate":
-            print_log("LAVA job {} failed validation (possible download error). Retry.".format(job_id))
-            return False
+        find_exception_from_metadata(metadata, job.job_id)
 
-    results_yaml = _call_proxy(proxy.results.get_testcase_results_yaml, job_id, test_suite, test_case)
-    results = yaml.load(results_yaml, Loader=loader(False))
-    if not results:
-        fatal_err("LAVA: no result for test_suite '{}', test_case '{}'".format(test_suite, test_case))
+    # If we reach this far, it means that the job ended without hwci script
+    # result and no LAVA infrastructure problem was found
+    job.status = "fail"
 
-    print_log("LAVA: result for test_suite '{}', test_case '{}': {}".format(test_suite, test_case, results[0]['result']))
-    if results[0]['result'] != 'pass':
-        fatal_err("FAIL")
 
-    return True
-
-def wait_until_job_is_started(proxy, job_id):
-    print_log(f"Waiting for job {job_id} to start.")
-    current_state = "Submitted"
-    waiting_states = ["Submitted", "Scheduling", "Scheduled"]
-    while current_state in waiting_states:
-        job_state = _call_proxy(proxy.scheduler.job_state, job_id)
-        current_state = job_state["job_state"]
-
-        time.sleep(WAIT_FOR_DEVICE_POLLING_TIME_SEC)
-    print_log(f"Job {job_id} started.")
-
-def follow_job_execution(proxy, job_id):
-    line_count = 0
-    finished = False
-    last_time_logs = datetime.now()
-    while not finished:
-        (finished, data) = _call_proxy(proxy.scheduler.jobs.logs, job_id, line_count)
-        if logs := yaml.load(str(data), Loader=loader(False)):
-            # Reset the timeout
-            last_time_logs = datetime.now()
-            for line in logs:
-                print("{} {}".format(line["dt"], line["msg"]))
-
-            line_count += len(logs)
-
-        else:
-            time_limit = timedelta(seconds=DEVICE_HANGING_TIMEOUT_SEC)
-            if datetime.now() - last_time_logs > time_limit:
-                print_log("LAVA job {} doesn't advance (machine got hung?). Retry.".format(job_id))
-                return False
-
-        # `proxy.scheduler.jobs.logs` does not block, even when there is no
-        # new log to be fetched. To avoid dosing the LAVA dispatcher
-        # machine, let's add a sleep to save them some stamina.
-        time.sleep(LOG_POLLING_TIME_SEC)
-
-    return True
-
-def show_job_data(proxy, job_id):
-    show = _call_proxy(proxy.scheduler.jobs.show, job_id)
+def show_job_data(job):
+    show = _call_proxy(job.proxy.scheduler.jobs.show, job.job_id)
     for field, value in show.items():
         print("{}\t: {}".format(field, value))
 
 
-def validate_job(proxy, job_file):
-    try:
-        return _call_proxy(proxy.scheduler.jobs.validate, job_file, True)
-    except:
-        return False
-
-def submit_job(proxy, job_file):
-    return _call_proxy(proxy.scheduler.jobs.submit, job_file)
-
-
-def retriable_follow_job(proxy, yaml_file):
-    retry_count = NUMBER_OF_RETRIES_TIMEOUT_DETECTION
-
-    while retry_count >= 0:
-        job_id = submit_job(proxy, yaml_file)
-
-        print_log("LAVA job id: {}".format(job_id))
-
-        wait_until_job_is_started(proxy, job_id)
-
-        if not follow_job_execution(proxy, job_id):
-            print_log(f"Job {job_id} has timed out. Cancelling it.")
-            # Cancel the job as it is considered unreachable by Mesa CI.
-            proxy.scheduler.jobs.cancel(job_id)
-
-            retry_count -= 1
+def parse_lava_lines(new_lines) -> list[str]:
+    parsed_lines: list[str] = []
+    for line in new_lines:
+        if line["lvl"] in ["results", "feedback"]:
             continue
+        elif line["lvl"] in ["warning", "error"]:
+            prefix = CONSOLE_LOG_COLOR_RED
+            suffix = CONSOLE_LOG_COLOR_RESET
+        elif line["lvl"] == "input":
+            prefix = "$ "
+            suffix = ""
+        else:
+            prefix = ""
+            suffix = ""
+        line = f'{prefix}{line["msg"]}{suffix}'
+        parsed_lines.append(line)
 
-        show_job_data(proxy, job_id)
+    return parsed_lines
 
-        if get_job_results(proxy, job_id, "0_mesa", "mesa") == True:
+
+def fetch_logs(job, max_idle_time) -> None:
+    # Poll to check for new logs, assuming that a prolonged period of
+    # silence means that the device has died and we should try it again
+    if datetime.now() - job.last_log_time > max_idle_time:
+        max_idle_time_min = max_idle_time.total_seconds() / 60
+        print_log(
+            f"No log output for {max_idle_time_min} minutes; "
+            "assuming device has died, retrying"
+        )
+
+        raise MesaCITimeoutError(
+            f"LAVA job {job.job_id} does not respond for {max_idle_time_min} "
+            "minutes. Retry.",
+            timeout_duration=max_idle_time,
+        )
+
+    time.sleep(LOG_POLLING_TIME_SEC)
+
+    # The XMLRPC binary packet may be corrupted, causing a YAML scanner error.
+    # Retry the log fetching several times before exposing the error.
+    for _ in range(5):
+        with contextlib.suppress(MesaCIParseException):
+            new_log_lines = job.get_logs()
             break
     else:
-        # The script attempted all the retries. The job seemed to fail.
-        return False
+        raise MesaCIParseException
 
-    return True
+    parsed_lines = parse_lava_lines(new_log_lines)
+
+    for line in parsed_lines:
+        print_log(line)
+
+    job.parse_job_result_from_log(new_log_lines)
+
+
+def follow_job_execution(job):
+    try:
+        job.submit()
+    except Exception as mesa_ci_err:
+        raise MesaCIException(
+            f"Could not submit LAVA job. Reason: {mesa_ci_err}"
+        ) from mesa_ci_err
+
+    print_log(f"Waiting for job {job.job_id} to start.")
+    while not job.is_started():
+        time.sleep(WAIT_FOR_DEVICE_POLLING_TIME_SEC)
+    print_log(f"Job {job.job_id} started.")
+
+    max_idle_time = timedelta(seconds=DEVICE_HANGING_TIMEOUT_SEC)
+    # Start to check job's health
+    job.heartbeat()
+    while not job.is_finished:
+        fetch_logs(job, max_idle_time)
+
+    show_job_data(job)
+
+    # Mesa Developers expect to have a simple pass/fail job result.
+    # If this does not happen, it probably means a LAVA infrastructure error
+    # happened.
+    if job.status not in ["pass", "fail"]:
+        find_lava_error(job)
+
+
+def retriable_follow_job(proxy, job_definition) -> LAVAJob:
+    retry_count = NUMBER_OF_RETRIES_TIMEOUT_DETECTION
+
+    for attempt_no in range(1, retry_count + 2):
+        job = LAVAJob(proxy, job_definition)
+        try:
+            follow_job_execution(job)
+            return job
+        except MesaCIException as mesa_exception:
+            print_log(mesa_exception)
+            job.cancel()
+        except KeyboardInterrupt as e:
+            print_log("LAVA job submitter was interrupted. Cancelling the job.")
+            job.cancel()
+            raise e
+        finally:
+            print_log(f"Finished executing LAVA job in the attempt #{attempt_no}")
+
+    raise MesaCIRetryError(
+        "Job failed after it exceeded the number of " f"{retry_count} retries.",
+        retry_count=retry_count,
+    )
+
+
+def treat_mesa_job_name(args):
+    # Remove mesa job names with spaces, which breaks the lava-test-case command
+    args.mesa_job_name = args.mesa_job_name.split(" ")[0]
 
 
 def main(args):
     proxy = setup_lava_proxy()
 
-    yaml_file = generate_lava_yaml(args)
+    job_definition = generate_lava_yaml(args)
 
     if args.dump_yaml:
-        print(hide_sensitive_data(generate_lava_yaml(args)))
+        print("LAVA job definition (YAML):")
+        print(hide_sensitive_data(job_definition))
+    job = LAVAJob(proxy, job_definition)
+
+    if errors := job.validate():
+        fatal_err(f"Error in LAVA job definition: {errors}")
+    print_log("LAVA job definition validated successfully")
 
     if args.validate_only:
-        ret = validate_job(proxy, yaml_file)
-        if not ret:
-            fatal_err("Error in LAVA job definition")
-        print("LAVA job definition validated successfully")
         return
 
-    if not retriable_follow_job(proxy, yaml_file):
-        fatal_err(
-            "Job failed after it exceeded the number of"
-            f"{NUMBER_OF_RETRIES_TIMEOUT_DETECTION} retries."
-        )
+    finished_job = retriable_follow_job(proxy, job_definition)
+    exit_code = 0 if finished_job.status == "pass" else 1
+    sys.exit(exit_code)
 
 
 def create_parser():
     parser = argparse.ArgumentParser("LAVA job submitter")
 
     parser.add_argument("--pipeline-info")
-    parser.add_argument("--base-system-url-prefix")
-    parser.add_argument("--mesa-build-url")
+    parser.add_argument("--rootfs-url-prefix")
+    parser.add_argument("--kernel-url-prefix")
+    parser.add_argument("--build-url")
     parser.add_argument("--job-rootfs-overlay-url")
     parser.add_argument("--job-timeout", type=int)
     parser.add_argument("--first-stage-init")
@@ -362,6 +525,7 @@ def create_parser():
     parser.add_argument("--validate-only", action='store_true')
     parser.add_argument("--dump-yaml", action='store_true')
     parser.add_argument("--visibility-group")
+    parser.add_argument("--mesa-job-name")
 
     return parser
 
@@ -376,4 +540,5 @@ if __name__ == "__main__":
 
     parser.set_defaults(func=main)
     args = parser.parse_args()
+    treat_mesa_job_name(args)
     args.func(args)

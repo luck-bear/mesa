@@ -32,6 +32,7 @@
 #include "util/u_dual_blend.h"
 #include "util/u_memory.h"
 #include "util/u_helpers.h"
+#include "vulkan/util/vk_format.h"
 
 #include <math.h>
 
@@ -118,6 +119,7 @@ zink_create_vertex_elements_state(struct pipe_context *pctx,
          ves->hw_state.attribs[i].format = format;
          assert(ves->hw_state.attribs[i].format != VK_FORMAT_UNDEFINED);
          ves->hw_state.attribs[i].offset = elem->src_offset;
+         ves->min_stride[binding] = MAX2(ves->min_stride[binding], elem->src_offset + vk_format_get_blocksize(format));
       }
    }
    assert(num_decomposed + num_elements <= PIPE_MAX_ATTRIBS);
@@ -609,7 +611,7 @@ zink_create_rasterizer_state(struct pipe_context *pctx,
    state->offset_point = rs_state->offset_point;
    state->offset_line = rs_state->offset_line;
    state->offset_tri = rs_state->offset_tri;
-   state->offset_units = rs_state->offset_units;
+   state->offset_units = rs_state->offset_units * 2;
    state->offset_clamp = rs_state->offset_clamp;
    state->offset_scale = rs_state->offset_scale;
 

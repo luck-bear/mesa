@@ -24,6 +24,7 @@
 // OTHER DEALINGS IN THE SOFTWARE.
 
 #include <sstream>
+#include <mutex>
 
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/IR/DiagnosticPrinter.h>
@@ -72,9 +73,14 @@ using ::llvm::raw_string_ostream;
 
 static void
 llvm_log_handler(const ::llvm::DiagnosticInfo &di, void *data) {
-   raw_string_ostream os { *reinterpret_cast<std::string *>(data) };
+   const clc_logger *logger = static_cast<clc_logger *>(data);
+
+   std::string log;
+   raw_string_ostream os { log };
    ::llvm::DiagnosticPrinterRawOStream printer { os };
    di.print(printer);
+
+   clc_error(logger, "%s", log.c_str());
 }
 
 class SPIRVKernelArg {
@@ -741,24 +747,22 @@ clc_free_kernels_info(const struct clc_kernel_info *kernels,
    free((void *)kernels);
 }
 
-static std::pair<std::unique_ptr<::llvm::Module>, std::unique_ptr<LLVMContext>>
-clc_compile_to_llvm_module(const struct clc_compile_args *args,
+static std::unique_ptr<::llvm::Module>
+clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
+                           const struct clc_compile_args *args,
                            const struct clc_logger *logger)
 {
-   LLVMInitializeAllTargets();
-   LLVMInitializeAllTargetInfos();
-   LLVMInitializeAllTargetMCs();
-   LLVMInitializeAllAsmPrinters();
-
-   std::string log;
-   std::unique_ptr<LLVMContext> llvm_ctx { new LLVMContext };
-   llvm_ctx->setDiagnosticHandlerCallBack(llvm_log_handler, &log);
+   std::string diag_log_str;
+   raw_string_ostream diag_log_stream { diag_log_str };
 
    std::unique_ptr<clang::CompilerInstance> c { new clang::CompilerInstance };
-   clang::DiagnosticsEngine diag { new clang::DiagnosticIDs,
-         new clang::DiagnosticOptions,
-         new clang::TextDiagnosticPrinter(*new raw_string_ostream(log),
-                                          &c->getDiagnosticOpts(), true)};
+
+   clang::DiagnosticsEngine diag {
+      new clang::DiagnosticIDs,
+      new clang::DiagnosticOptions,
+      new clang::TextDiagnosticPrinter(diag_log_stream,
+                                       &c->getDiagnosticOpts())
+   };
 
    std::vector<const char *> clang_opts = {
       args->source.name,
@@ -788,13 +792,13 @@ clc_compile_to_llvm_module(const struct clc_compile_args *args,
                                                   clang_opts.data() + clang_opts.size(),
 #endif
                                                   diag)) {
-      clc_error(logger, "%sCouldn't create Clang invocation.\n", log.c_str());
+      clc_error(logger, "Couldn't create Clang invocation.\n");
       return {};
    }
 
    if (diag.hasErrorOccurred()) {
       clc_error(logger, "%sErrors occurred during Clang invocation.\n",
-                log.c_str());
+                diag_log_str.c_str());
       return {};
    }
 
@@ -804,8 +808,8 @@ clc_compile_to_llvm_module(const struct clc_compile_args *args,
    c->getDiagnosticOpts().ShowCarets = false;
 
    c->createDiagnostics(new clang::TextDiagnosticPrinter(
-                           *new raw_string_ostream(log),
-                           &c->getDiagnosticOpts(), true));
+                           diag_log_stream,
+                           &c->getDiagnosticOpts()));
 
    c->setTarget(clang::TargetInfo::CreateTargetInfo(
                    c->getDiagnostics(), c->getInvocation().TargetOpts));
@@ -869,14 +873,14 @@ clc_compile_to_llvm_module(const struct clc_compile_args *args,
            ::llvm::MemoryBuffer::getMemBufferCopy(std::string(args->source.value)).release());
 
    // Compile the code
-   clang::EmitLLVMOnlyAction act(llvm_ctx.get());
+   clang::EmitLLVMOnlyAction act(&llvm_ctx);
    if (!c->ExecuteAction(act)) {
       clc_error(logger, "%sError executing LLVM compilation action.\n",
-                log.c_str());
+                diag_log_str.c_str());
       return {};
    }
 
-   return { act.takeModule(), std::move(llvm_ctx) };
+   return act.takeModule();
 }
 
 static SPIRV::VersionNumber
@@ -897,7 +901,7 @@ spirv_version_to_llvm_spirv_translator_version(enum clc_spirv_version version)
 
 static int
 llvm_mod_to_spirv(std::unique_ptr<::llvm::Module> mod,
-                  std::unique_ptr<LLVMContext> context,
+                  LLVMContext &context,
                   const struct clc_compile_args *args,
                   const struct clc_logger *logger,
                   struct clc_binary *out_spirv)
@@ -960,13 +964,19 @@ clc_c_to_spir(const struct clc_compile_args *args,
               const struct clc_logger *logger,
               struct clc_binary *out_spir)
 {
-   auto pair = clc_compile_to_llvm_module(args, logger);
-   if (!pair.first)
+   clc_initialize_llvm();
+
+   LLVMContext llvm_ctx;
+   llvm_ctx.setDiagnosticHandlerCallBack(llvm_log_handler,
+                                         const_cast<clc_logger *>(logger));
+
+   auto mod = clc_compile_to_llvm_module(llvm_ctx, args, logger);
+   if (!mod)
       return -1;
 
    ::llvm::SmallVector<char, 0> buffer;
    ::llvm::BitcodeWriter writer(buffer);
-   writer.writeModule(*pair.first);
+   writer.writeModule(*mod);
 
    out_spir->size = buffer.size_in_bytes();
    out_spir->data = malloc(out_spir->size);
@@ -980,10 +990,16 @@ clc_c_to_spirv(const struct clc_compile_args *args,
                const struct clc_logger *logger,
                struct clc_binary *out_spirv)
 {
-   auto pair = clc_compile_to_llvm_module(args, logger);
-   if (!pair.first)
+   clc_initialize_llvm();
+
+   LLVMContext llvm_ctx;
+   llvm_ctx.setDiagnosticHandlerCallBack(llvm_log_handler,
+                                         const_cast<clc_logger *>(logger));
+
+   auto mod = clc_compile_to_llvm_module(llvm_ctx, args, logger);
+   if (!mod)
       return -1;
-   return llvm_mod_to_spirv(std::move(pair.first), std::move(pair.second), args, logger, out_spirv);
+   return llvm_mod_to_spirv(std::move(mod), llvm_ctx, args, logger, out_spirv);
 }
 
 int
@@ -991,18 +1007,18 @@ clc_spir_to_spirv(const struct clc_binary *in_spir,
                   const struct clc_logger *logger,
                   struct clc_binary *out_spirv)
 {
-   LLVMInitializeAllTargets();
-   LLVMInitializeAllTargetInfos();
-   LLVMInitializeAllTargetMCs();
-   LLVMInitializeAllAsmPrinters();
+   clc_initialize_llvm();
 
-   std::unique_ptr<LLVMContext> llvm_ctx{ new LLVMContext };
+   LLVMContext llvm_ctx;
+   llvm_ctx.setDiagnosticHandlerCallBack(llvm_log_handler,
+                                         const_cast<clc_logger *>(logger));
+
    ::llvm::StringRef spir_ref(static_cast<const char*>(in_spir->data), in_spir->size);
-   auto mod = ::llvm::parseBitcodeFile(::llvm::MemoryBufferRef(spir_ref, "<spir>"), *llvm_ctx);
+   auto mod = ::llvm::parseBitcodeFile(::llvm::MemoryBufferRef(spir_ref, "<spir>"), llvm_ctx);
    if (!mod)
       return -1;
 
-   return llvm_mod_to_spirv(std::move(mod.get()), std::move(llvm_ctx), NULL, logger, out_spirv);
+   return llvm_mod_to_spirv(std::move(mod.get()), llvm_ctx, NULL, logger, out_spirv);
 }
 
 class SPIRVMessageConsumer {
@@ -1012,22 +1028,20 @@ public:
    void operator()(spv_message_level_t level, const char *src,
                    const spv_position_t &pos, const char *msg)
    {
-      switch(level) {
-      case SPV_MSG_FATAL:
-      case SPV_MSG_INTERNAL_ERROR:
-      case SPV_MSG_ERROR:
-         clc_error(logger, "(file=%s,line=%ld,column=%ld,index=%ld): %s\n",
-                   src, pos.line, pos.column, pos.index, msg);
-         break;
+      if (level == SPV_MSG_INFO || level == SPV_MSG_DEBUG)
+         return;
 
-      case SPV_MSG_WARNING:
-         clc_warning(logger, "(file=%s,line=%ld,column=%ld,index=%ld): %s\n",
-                     src, pos.line, pos.column, pos.index, msg);
-         break;
+      std::ostringstream message;
+      message << "(file=" << src
+              << ",line=" << pos.line
+              << ",column=" << pos.column
+              << ",index=" << pos.index
+              << "): " << msg << "\n";
 
-      default:
-         break;
-      }
+      if (level == SPV_MSG_WARNING)
+         clc_warning(logger, "%s", message.str().c_str());
+      else
+         clc_error(logger, "%s", message.str().c_str());
    }
 
 private:
@@ -1153,4 +1167,23 @@ void
 clc_free_spirv_binary(struct clc_binary *spvbin)
 {
    free(spvbin->data);
+}
+
+void
+initialize_llvm_once(void)
+{
+   LLVMInitializeAllTargets();
+   LLVMInitializeAllTargetInfos();
+   LLVMInitializeAllTargetMCs();
+   LLVMInitializeAllAsmParsers();
+   LLVMInitializeAllAsmPrinters();
+}
+
+std::once_flag initialize_llvm_once_flag;
+
+void
+clc_initialize_llvm(void)
+{
+   std::call_once(initialize_llvm_once_flag,
+                  []() { initialize_llvm_once(); });
 }

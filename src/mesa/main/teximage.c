@@ -2821,9 +2821,10 @@ mesa_format
 _mesa_choose_texture_format(struct gl_context *ctx,
                             struct gl_texture_object *texObj,
                             GLenum target, GLint level,
-                            GLenum internalFormat, GLenum format, GLenum type)
+                            GLenum internalFormat, GLenum format, GLenum type,
+                            unsigned samples)
 {
-   mesa_format f;
+   mesa_format f = MESA_FORMAT_NONE;
 
    /* see if we've already chosen a format for the previous level */
    if (level > 0) {
@@ -2841,8 +2842,31 @@ _mesa_choose_texture_format(struct gl_context *ctx,
       }
    }
 
-   f = st_ChooseTextureFormat(ctx, target, internalFormat,
-                              format, type);
+   if (samples > 0) {
+      unsigned trySamples = samples;
+      /* TODO: This somewhat duplicates the logic in st_texture_storage. */
+      /* Find msaa sample count which is actually supported.  For example,
+       * if the user requests 1x but only 4x or 8x msaa is supported, we'll
+       * choose 4x here.
+       */
+      if (ctx->Const.MaxSamples > 1 && samples == 1) {
+         /* don't try num_samples = 1 with drivers that support real msaa */
+         trySamples = 2;
+      }
+
+      for (; trySamples <= ctx->Const.MaxSamples; trySamples++) {
+         f = st_ChooseTextureFormat(ctx, target, internalFormat,
+                                    format, type, trySamples);
+         if (f != MESA_FORMAT_NONE)
+            break;
+      }
+   }
+
+   if (f == MESA_FORMAT_NONE) {
+      f = st_ChooseTextureFormat(ctx, target, internalFormat,
+                                 format, type, samples);
+   }
+
    assert(f != MESA_FORMAT_NONE);
    return f;
 }
@@ -3073,7 +3097,7 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
       }
 
       texFormat = _mesa_choose_texture_format(ctx, texObj, target, level,
-                                              internalFormat, format, type);
+                                              internalFormat, format, type, 0);
    }
 
    assert(texFormat != MESA_FORMAT_NONE);
@@ -4312,7 +4336,7 @@ copyteximage(struct gl_context *ctx, GLuint dims, struct gl_texture_object *texO
    assert(texObj);
 
    texFormat = _mesa_choose_texture_format(ctx, texObj, target, level,
-                                           internalFormat, GL_NONE, GL_NONE);
+                                           internalFormat, GL_NONE, GL_NONE, 0);
 
    /* First check if reallocating the texture buffer can be avoided.
     * Without the realloc the copy can be 20x faster.
@@ -6832,7 +6856,7 @@ texture_image_multisample(struct gl_context *ctx, GLuint dims,
    }
 
    texFormat = _mesa_choose_texture_format(ctx, texObj, target, 0,
-         internalformat, GL_NONE, GL_NONE);
+         internalformat, GL_NONE, GL_NONE, samples);
    assert(texFormat != MESA_FORMAT_NONE);
 
    dimensionsOK = _mesa_legal_texture_dimensions(ctx, target, 0,

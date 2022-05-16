@@ -143,6 +143,49 @@ iris_get_name(struct pipe_screen *pscreen)
 }
 
 static int
+iris_get_video_memory(struct iris_screen *screen)
+{
+   uint64_t vram = iris_bufmgr_vram_size(screen->bufmgr);
+   uint64_t sram = iris_bufmgr_sram_size(screen->bufmgr);
+   uint64_t osmem;
+   if (vram) {
+      return vram / (1024 * 1024);
+   } else if (sram) {
+      return sram / (1024 * 1024);
+   } else if (os_get_available_system_memory(&osmem)) {
+      return osmem / (1024 * 1024);
+   } else {
+      /* This is the old code path, it get the GGTT size from the kernel
+       * (which should always be 4Gb on Gfx8+).
+       *
+       * We should probably never end up here. This is just a fallback to get
+       * some kind of value in case os_get_available_system_memory fails.
+       */
+      const struct intel_device_info *devinfo = &screen->devinfo;
+      /* Once a batch uses more than 75% of the maximum mappable size, we
+       * assume that there's some fragmentation, and we start doing extra
+       * flushing, etc.  That's the big cliff apps will care about.
+       */
+      const unsigned gpu_mappable_megabytes =
+         (devinfo->aperture_bytes * 3 / 4) / (1024 * 1024);
+
+      const long system_memory_pages = sysconf(_SC_PHYS_PAGES);
+      const long system_page_size = sysconf(_SC_PAGE_SIZE);
+
+      if (system_memory_pages <= 0 || system_page_size <= 0)
+         return -1;
+
+      const uint64_t system_memory_bytes =
+         (uint64_t) system_memory_pages * (uint64_t) system_page_size;
+
+      const unsigned system_memory_megabytes =
+         (unsigned) (system_memory_bytes / (1024 * 1024));
+
+      return MIN2(system_memory_megabytes, gpu_mappable_megabytes);
+   }
+}
+
+static int
 iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 {
    struct iris_screen *screen = (struct iris_screen *)pscreen;
@@ -320,28 +363,8 @@ iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 0x8086;
    case PIPE_CAP_DEVICE_ID:
       return screen->pci_id;
-   case PIPE_CAP_VIDEO_MEMORY: {
-      /* Once a batch uses more than 75% of the maximum mappable size, we
-       * assume that there's some fragmentation, and we start doing extra
-       * flushing, etc.  That's the big cliff apps will care about.
-       */
-      const unsigned gpu_mappable_megabytes =
-         (devinfo->aperture_bytes * 3 / 4) / (1024 * 1024);
-
-      const long system_memory_pages = sysconf(_SC_PHYS_PAGES);
-      const long system_page_size = sysconf(_SC_PAGE_SIZE);
-
-      if (system_memory_pages <= 0 || system_page_size <= 0)
-         return -1;
-
-      const uint64_t system_memory_bytes =
-         (uint64_t) system_memory_pages * (uint64_t) system_page_size;
-
-      const unsigned system_memory_megabytes =
-         (unsigned) (system_memory_bytes / (1024 * 1024));
-
-      return MIN2(system_memory_megabytes, gpu_mappable_megabytes);
-   }
+   case PIPE_CAP_VIDEO_MEMORY:
+      return iris_get_video_memory(screen);
    case PIPE_CAP_MAX_SHADER_PATCH_VARYINGS:
    case PIPE_CAP_MAX_VARYINGS:
       return 32;
@@ -456,7 +479,7 @@ iris_get_shader_param(struct pipe_screen *pscreen,
       return 16;
    case PIPE_SHADER_CAP_MAX_TEMPS:
       return 256; /* GL_MAX_PROGRAM_TEMPORARIES_ARB */
-   case PIPE_SHADER_CAP_TGSI_CONT_SUPPORTED:
+   case PIPE_SHADER_CAP_CONT_SUPPORTED:
       return 0;
    case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
    case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
@@ -495,13 +518,10 @@ iris_get_shader_param(struct pipe_screen *pscreen,
          irs |= 1 << PIPE_SHADER_IR_NIR_SERIALIZED;
       return irs;
    }
-   case PIPE_SHADER_CAP_TGSI_DROUND_SUPPORTED:
-   case PIPE_SHADER_CAP_TGSI_LDEXP_SUPPORTED:
+   case PIPE_SHADER_CAP_DROUND_SUPPORTED:
+   case PIPE_SHADER_CAP_LDEXP_SUPPORTED:
       return 1;
-   case PIPE_SHADER_CAP_LOWER_IF_THRESHOLD:
-   case PIPE_SHADER_CAP_TGSI_SKIP_MERGE_REGISTERS:
-   case PIPE_SHADER_CAP_TGSI_DFRACEXP_DLDEXP_SUPPORTED:
-   case PIPE_SHADER_CAP_TGSI_FMA_SUPPORTED:
+   case PIPE_SHADER_CAP_DFRACEXP_DLDEXP_SUPPORTED:
    case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
    case PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED:
    case PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT:
@@ -823,6 +843,8 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
       driQueryOptionb(config->options, "always_flush_cache");
    screen->driconf.sync_compile =
       driQueryOptionb(config->options, "sync_compile");
+   screen->driconf.limit_trig_input_range =
+      driQueryOptionb(config->options, "limit_trig_input_range");
 
    screen->precompile = env_var_as_boolean("shader_precompile", true);
 

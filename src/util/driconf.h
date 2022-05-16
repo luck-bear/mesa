@@ -291,6 +291,10 @@
    DRI_CONF_OPT_B(vk_dont_care_as_load, def, \
                   "Treat VK_ATTACHMENT_LOAD_OP_DONT_CARE as LOAD_OP_LOAD, workaround on tiler GPUs for games that confuse these two load ops")
 
+#define DRI_CONF_LIMIT_TRIG_INPUT_RANGE(def) \
+   DRI_CONF_OPT_B(limit_trig_input_range, def, \
+                  "Limit trig input range to [-2p : 2p] to improve sin/cos calculation precision on Intel")
+
 /**
  * \brief Image quality-related options
  */
@@ -472,14 +476,6 @@
  * \brief radeonsi specific configuration options
  */
 
-#define DRI_CONF_RADEONSI_ASSUME_NO_Z_FIGHTS(def) \
-   DRI_CONF_OPT_B(radeonsi_assume_no_z_fights, def, \
-                  "Assume no Z fights (enables aggressive out-of-order rasterization to improve performance; may cause rendering errors)")
-
-#define DRI_CONF_RADEONSI_COMMUTATIVE_BLEND_ADD(def) \
-   DRI_CONF_OPT_B(radeonsi_commutative_blend_add, def, \
-                  "Commutative additive blending optimizations (may cause rendering errors)")
-
 #define DRI_CONF_RADEONSI_ZERO_ALL_VRAM_ALLOCS(def) \
    DRI_CONF_OPT_B(radeonsi_zerovram, def, \
                   "Zero all vram allocations")
@@ -575,5 +571,17 @@
 #define DRI_CONF_RADV_DISABLE_ANISO_SINGLE_LEVEL(def) \
   DRI_CONF_OPT_B(radv_disable_aniso_single_level, def, \
                  "Disable anisotropic filtering for single level images")
+
+#define DRI_CONF_RADV_DISABLE_SINKING_LOAD_INPUT_FS(def) \
+   DRI_CONF_OPT_B(radv_disable_sinking_load_input_fs, def, \
+                  "Disable sinking load inputs for fragment shaders")
+
+/**
+ * \brief ANV specific configuration options
+ */
+
+#define DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS(def) \
+   DRI_CONF_OPT_B(anv_assume_full_subgroups, def, \
+                  "Allow assuming full subgroups requirement even when it's not specified explicitly")
 
 #endif

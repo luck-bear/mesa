@@ -23,6 +23,7 @@
 
 #include "zink_context.h"
 #include "zink_kopper.h"
+#include "zink_framebuffer.h"
 #include "zink_query.h"
 #include "zink_resource.h"
 #include "zink_screen.h"
@@ -120,6 +121,19 @@ clear_in_rp(struct pipe_context *pctx,
    struct zink_batch *batch = &ctx->batch;
    zink_batch_rp(ctx);
    VKCTX(CmdClearAttachments)(batch->state->cmdbuf, num_attachments, attachments, 1, &cr);
+   /*
+       Rendering within a subpass containing a feedback loop creates a data race, except in the following
+       cases:
+       • If a memory dependency is inserted between when the attachment is written and when it is
+       subsequently read by later fragments. Pipeline barriers expressing a subpass self-dependency
+       are the only way to achieve this, and one must be inserted every time a fragment will read
+       values at a particular sample (x, y, layer, sample) coordinate, if those values have been written
+       since the most recent pipeline barrier
+
+       VK 1.3.211, Chapter 8: Render Pass
+    */
+   if (ctx->fbfetch_outputs)
+      ctx->base.texture_barrier(&ctx->base, PIPE_TEXTURE_BARRIER_FRAMEBUFFER);
 }
 
 static void
@@ -140,8 +154,10 @@ clear_color_no_rp(struct zink_context *ctx, struct zink_resource *res, const uni
    color.uint32[2] = pcolor->ui[2];
    color.uint32[3] = pcolor->ui[3];
 
-   if (res->obj->dt)
-      zink_kopper_acquire(ctx, res, UINT64_MAX);
+   if (zink_is_swapchain(res)) {
+      if (!zink_kopper_acquire(ctx, res, UINT64_MAX))
+         return;
+   }
    if (zink_resource_image_needs_barrier(res, VK_IMAGE_LAYOUT_GENERAL, 0, 0) &&
        zink_resource_image_needs_barrier(res, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 0))
       zink_resource_image_barrier(ctx, res, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 0);
@@ -461,6 +477,7 @@ zink_clear_buffer(struct pipe_context *pctx,
       zink_batch_no_rp(ctx);
       zink_batch_reference_resource_rw(batch, res, true);
       util_range_add(&res->base.b, &res->valid_buffer_range, offset, offset + size);
+      zink_resource_buffer_barrier(ctx, res, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
       VKCTX(CmdFillBuffer)(batch->state->cmdbuf, res->obj->buffer, offset, size, *(uint32_t*)clear_value);
       return;
    }
@@ -500,10 +517,50 @@ zink_clear_depth_stencil(struct pipe_context *pctx, struct pipe_surface *dst,
                          bool render_condition_enabled)
 {
    struct zink_context *ctx = zink_context(pctx);
-   zink_blit_begin(ctx, ZINK_BLIT_SAVE_FB | ZINK_BLIT_SAVE_FS | (render_condition_enabled ? 0 : ZINK_BLIT_NO_COND_RENDER));
-   util_blitter_clear_depth_stencil(ctx->blitter, dst, clear_flags, depth, stencil, dstx, dsty, width, height);
-   if (!render_condition_enabled && ctx->render_condition_active)
+   struct zink_resource *res = zink_resource(dst->texture);
+   struct u_rect rect = {dstx, dstx + width, dsty, dsty + height};
+   bool needs_rp = !zink_blit_region_fills(rect, dst->texture->width0, dst->texture->height0);
+   needs_rp |= check_3d_layers(dst);
+   bool render_condition_active = ctx->render_condition_active;
+   if (res->fb_binds) { //current depth attachment
+      struct pipe_scissor_state scissor = {dstx, dsty, dstx + width, dsty + height};
+      if (!render_condition_enabled && render_condition_active) {
+         zink_stop_conditional_render(ctx);
+         ctx->render_condition_active = false;
+      }
+      unsigned orig_width = ctx->fb_state.width, orig_height = ctx->fb_state.height;
+      bool fb_changed = !zink_blit_region_fills(rect, ctx->fb_state.width, ctx->fb_state.height);
+      if (fb_changed) {
+         ctx->fb_state.width = dstx + width;
+         ctx->fb_state.height = dsty + height;
+         zink_update_framebuffer_state(ctx, orig_width, orig_height);
+         zink_batch_no_rp(ctx);
+      }
+      zink_clear(pctx, clear_flags, &scissor, NULL, depth, stencil);
+      zink_batch_rp(ctx);
+      if (fb_changed) {
+         ctx->fb_state.width = orig_width;
+         ctx->fb_state.height = orig_height;
+         zink_update_framebuffer_state(ctx, dstx + width, dsty + height);
+         zink_batch_no_rp(ctx);
+      }
+   } else {
+      if (needs_rp) {
+         zink_blit_begin(ctx, ZINK_BLIT_SAVE_FB | ZINK_BLIT_SAVE_FS | (render_condition_enabled ? 0 : ZINK_BLIT_NO_COND_RENDER));
+         util_blitter_clear_depth_stencil(ctx->blitter, dst, clear_flags, depth, stencil, dstx, dsty, width, height);
+      } else {
+         VkImageAspectFlags aspects = 0;
+         if (clear_flags & PIPE_CLEAR_DEPTH)
+            aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
+         if (clear_flags & PIPE_CLEAR_STENCIL)
+            aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+         for (unsigned i = 0; i < res->base.b.last_level; i++)
+            clear_zs_no_rp(ctx, res, aspects, depth, stencil, i, 0, res->base.b.array_size);
+      }
+   }
+   if (!render_condition_enabled && render_condition_active)
       zink_start_conditional_render(ctx);
+   ctx->render_condition_active = render_condition_active;
 }
 
 bool

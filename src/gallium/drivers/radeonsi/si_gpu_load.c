@@ -32,8 +32,8 @@
  * GPU load between the two samples.
  */
 
-#include "radeonsi/si_pipe.h"
-#include "radeonsi/si_query.h"
+#include "si_pipe.h"
+#include "si_query.h"
 #include "util/os_time.h"
 
 /* For good accuracy at 1000 fps or lower. This will be inaccurate for higher
@@ -101,7 +101,7 @@ static void si_update_mmio_counters(struct si_screen *sscreen, union si_mmio_cou
    UPDATE_COUNTER(gui, GUI_ACTIVE);
    gui_busy = GUI_ACTIVE(value);
 
-   if (sscreen->info.chip_class == GFX7 || sscreen->info.chip_class == GFX8) {
+   if (sscreen->info.gfx_level == GFX7 || sscreen->info.gfx_level == GFX8) {
       /* SRBM_STATUS2 */
       sscreen->ws->read_registers(sscreen->ws, SRBM_STATUS2, 1, &value);
 
@@ -109,7 +109,7 @@ static void si_update_mmio_counters(struct si_screen *sscreen, union si_mmio_cou
       sdma_busy = SDMA_BUSY(value);
    }
 
-   if (sscreen->info.chip_class >= GFX8) {
+   if (sscreen->info.gfx_level >= GFX8) {
       /* CP_STAT */
       sscreen->ws->read_registers(sscreen->ws, CP_STAT, 1, &value);
 

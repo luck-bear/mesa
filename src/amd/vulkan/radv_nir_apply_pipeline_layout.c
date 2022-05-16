@@ -29,7 +29,7 @@
 #include "radv_shader_args.h"
 
 typedef struct {
-   enum chip_class chip_class;
+   enum amd_gfx_level gfx_level;
    uint32_t address32_hi;
    bool disable_aniso_single_level;
    bool has_image_load_dcc_bug;
@@ -161,7 +161,7 @@ load_inline_buffer_descriptor(nir_builder *b, apply_layout_state *state, nir_ssa
    uint32_t desc_type =
       S_008F0C_DST_SEL_X(V_008F0C_SQ_SEL_X) | S_008F0C_DST_SEL_Y(V_008F0C_SQ_SEL_Y) |
       S_008F0C_DST_SEL_Z(V_008F0C_SQ_SEL_Z) | S_008F0C_DST_SEL_W(V_008F0C_SQ_SEL_W);
-   if (state->chip_class >= GFX10) {
+   if (state->gfx_level >= GFX10) {
       desc_type |= S_008F0C_FORMAT(V_008F0C_GFX10_FORMAT_32_FLOAT) |
                    S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_RAW) | S_008F0C_RESOURCE_LEVEL(1);
    } else {
@@ -251,8 +251,9 @@ get_sampler_desc(nir_builder *b, apply_layout_state *state, nir_deref_instr *der
          }
       }
 
+      uint32_t dword0_mask = tex->op == nir_texop_tg4 ? C_008F30_TRUNC_COORD : 0xffffffffu;
       const uint32_t *samplers = radv_immutable_samplers(layout, binding);
-      return nir_imm_ivec4(b, samplers[constant_index * 4 + 0], samplers[constant_index * 4 + 1],
+      return nir_imm_ivec4(b, samplers[constant_index * 4 + 0] & dword0_mask, samplers[constant_index * 4 + 1],
                            samplers[constant_index * 4 + 2], samplers[constant_index * 4 + 3]);
    }
 
@@ -467,8 +468,7 @@ apply_layout_to_tex(nir_builder *b, apply_layout_state *state, nir_tex_instr *te
    } else if (tex->sampler_dim == GLSL_SAMPLER_DIM_BUF) {
       image = get_sampler_desc(b, state, texture_deref_instr, AC_DESC_BUFFER,
                                tex->texture_non_uniform, tex, false);
-   } else if (tex->op == nir_texop_fragment_mask_fetch_amd ||
-              tex->op == nir_texop_samples_identical) {
+   } else if (tex->op == nir_texop_fragment_mask_fetch_amd) {
       image = get_sampler_desc(b, state, texture_deref_instr, AC_DESC_FMASK,
                                tex->texture_non_uniform, tex, false);
    } else {
@@ -481,7 +481,7 @@ apply_layout_to_tex(nir_builder *b, apply_layout_state *state, nir_tex_instr *te
                                  tex->sampler_non_uniform, tex, false);
 
       if (state->disable_aniso_single_level && tex->sampler_dim < GLSL_SAMPLER_DIM_RECT &&
-          state->chip_class < GFX8) {
+          state->gfx_level < GFX8) {
          /* Disable anisotropic filtering if BASE_LEVEL == LAST_LEVEL.
           *
           * GFX6-GFX7:
@@ -527,7 +527,7 @@ radv_nir_apply_pipeline_layout(nir_shader *shader, struct radv_device *device,
                                const struct radv_shader_args *args)
 {
    apply_layout_state state = {
-      .chip_class = device->physical_device->rad_info.chip_class,
+      .gfx_level = device->physical_device->rad_info.gfx_level,
       .address32_hi = device->physical_device->rad_info.address32_hi,
       .disable_aniso_single_level = device->instance->disable_aniso_single_level,
       .has_image_load_dcc_bug = device->physical_device->rad_info.has_image_load_dcc_bug,

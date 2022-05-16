@@ -367,7 +367,7 @@ emit_tfbos(struct fd_context *ctx, const struct ir3_shader_variant *v,
    uint32_t offset = const_state->offsets.tfbo;
    if (v->constlen > offset) {
       struct fd_streamout_stateobj *so = &ctx->streamout;
-      struct ir3_stream_output_info *info = &v->shader->stream_output;
+      const struct ir3_stream_output_info *info = &v->stream_output;
       uint32_t params = 4;
       uint32_t offsets[params];
       struct fd_bo *bos[params];
@@ -444,7 +444,7 @@ emit_kernel_params(struct fd_context *ctx, const struct ir3_shader_variant *v,
    if (v->constlen > offset) {
       ring_wfi(ctx->batch, ring);
       emit_const_user(ring, v, offset * 4,
-                      align(v->shader->cs.req_input_mem, 4),
+                      align(v->cs.req_input_mem, 4),
                       info->input);
    }
 }

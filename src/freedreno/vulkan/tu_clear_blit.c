@@ -333,7 +333,9 @@ r2d_setup(struct tu_cmd_buffer *cmd,
 {
    assert(samples == VK_SAMPLE_COUNT_1_BIT);
 
-   tu_emit_cache_flush_ccu(cmd, cs, TU_CMD_CCU_SYSMEM);
+   if (!cmd->state.pass) {
+      tu_emit_cache_flush_ccu(cmd, cs, TU_CMD_CCU_SYSMEM);
+   }
 
    r2d_setup_common(cmd, cs, format, aspect_mask, blit_param, clear, ubwc, false);
 }
@@ -592,7 +594,8 @@ compile_shader(struct tu_device *dev, struct nir_shader *nir,
    struct tu6_global *global = dev->global_bo->map;
 
    assert(*offset + so->info.sizedwords <= ARRAY_SIZE(global->shaders));
-   dev->global_shaders[idx] = so;
+   dev->global_shaders[idx] = sh;
+   dev->global_shader_variants[idx] = so;
    memcpy(&global->shaders[*offset], so->bin,
           sizeof(uint32_t) * so->info.sizedwords);
    dev->global_shader_va[idx] = dev->global_bo->iova +
@@ -621,7 +624,7 @@ tu_destroy_clear_blit_shaders(struct tu_device *dev)
 {
    for (unsigned i = 0; i < GLOBAL_SH_COUNT; i++) {
       if (dev->global_shaders[i])
-         ir3_shader_destroy(dev->global_shaders[i]->shader);
+         ir3_shader_destroy(dev->global_shaders[i]);
    }
 }
 
@@ -632,7 +635,7 @@ r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, bool blit,
    enum global_shader vs_id =
       blit ? GLOBAL_SH_VS_BLIT : GLOBAL_SH_VS_CLEAR;
 
-   struct ir3_shader_variant *vs = cmd->device->global_shaders[vs_id];
+   struct ir3_shader_variant *vs = cmd->device->global_shader_variants[vs_id];
    uint64_t vs_iova = cmd->device->global_shader_va[vs_id];
 
    enum global_shader fs_id = GLOBAL_SH_FS_BLIT;
@@ -646,7 +649,7 @@ r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, bool blit,
    if (!blit)
       fs_id = GLOBAL_SH_FS_CLEAR0 + num_rts;
 
-   struct ir3_shader_variant *fs = cmd->device->global_shaders[fs_id];
+   struct ir3_shader_variant *fs = cmd->device->global_shader_variants[fs_id];
    uint64_t fs_iova = cmd->device->global_shader_va[fs_id];
 
    tu_cs_emit_regs(cs, A6XX_HLSQ_INVALIDATE_CMD(
@@ -1792,6 +1795,7 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
       /* Both formats use UBWC and so neither can be reinterpreted.
        * TODO: We could do an in-place decompression of the dst instead.
        */
+      perf_debug(cmd->device, "TODO: Do in-place UBWC decompression for UBWC->UBWC blits");
       use_staging_blit = true;
    }
 
@@ -2280,6 +2284,8 @@ tu_clear_sysmem_attachments(struct tu_cmd_buffer *cmd,
             s_clear_val = attachments[i].clearValue.depthStencil.stencil & 0xff;
          }
       }
+
+      cmd->state.attachment_cmd_clear[a] = true;
    }
 
    /* We may not know the multisample count if there are no attachments, so
@@ -2530,7 +2536,9 @@ tu_clear_gmem_attachments(struct tu_cmd_buffer *cmd,
    const struct tu_subpass *subpass = cmd->state.subpass;
    struct tu_cs *cs = &cmd->draw_cs;
 
-   /* TODO: swap the loops for smaller cmdstream */
+   if (rect_count > 1)
+      perf_debug(cmd->device, "TODO: Swap tu_clear_gmem_attachments() loop for smaller command stream");
+
    for (unsigned i = 0; i < rect_count; i++) {
       unsigned x1 = rects[i].rect.offset.x;
       unsigned y1 = rects[i].rect.offset.y;
@@ -2550,6 +2558,8 @@ tu_clear_gmem_attachments(struct tu_cmd_buffer *cmd,
 
          if (a == VK_ATTACHMENT_UNUSED)
                continue;
+
+         cmd->state.attachment_cmd_clear[a] = true;
 
          tu_emit_clear_gmem_attachment(cmd, cs, a, attachments[j].aspectMask,
                                        &attachments[j].clearValue);
@@ -2799,23 +2809,95 @@ blit_can_resolve(VkFormat format)
    return true;
 }
 
+static void
+tu_begin_load_store_cond_exec(struct tu_cmd_buffer *cmd,
+                              struct tu_cs *cs, bool load)
+{
+   tu_cond_exec_start(cs, CP_COND_REG_EXEC_0_MODE(PRED_TEST));
+
+   if (!unlikely(cmd->device->physical_device->instance->debug_flags &
+                 TU_DEBUG_LOG_SKIP_GMEM_OPS))
+      return;
+
+   uint64_t result_iova;
+   if (load)
+      result_iova = global_iova(cmd, dbg_gmem_taken_loads);
+   else
+      result_iova = global_iova(cmd, dbg_gmem_taken_stores);
+
+   tu_cs_emit_pkt7(cs, CP_MEM_TO_MEM, 7);
+   tu_cs_emit(cs, CP_MEM_TO_MEM_0_NEG_B);
+   tu_cs_emit_qw(cs, result_iova);
+   tu_cs_emit_qw(cs, result_iova);
+   tu_cs_emit_qw(cs, global_iova(cmd, dbg_one));
+}
+
+static void
+tu_end_load_store_cond_exec(struct tu_cmd_buffer *cmd,
+                            struct tu_cs *cs, bool load)
+{
+   tu_cond_exec_end(cs);
+
+   if (!unlikely(cmd->device->physical_device->instance->debug_flags &
+                 TU_DEBUG_LOG_SKIP_GMEM_OPS))
+      return;
+
+   uint64_t result_iova;
+   if (load)
+      result_iova = global_iova(cmd, dbg_gmem_total_loads);
+   else
+      result_iova = global_iova(cmd, dbg_gmem_total_stores);
+
+   tu_cs_emit_pkt7(cs, CP_MEM_TO_MEM, 7);
+   tu_cs_emit(cs, CP_MEM_TO_MEM_0_NEG_B);
+   tu_cs_emit_qw(cs, result_iova);
+   tu_cs_emit_qw(cs, result_iova);
+   tu_cs_emit_qw(cs, global_iova(cmd, dbg_one));
+}
+
 void
 tu_load_gmem_attachment(struct tu_cmd_buffer *cmd,
                         struct tu_cs *cs,
                         uint32_t a,
+                        bool cond_exec_allowed,
                         bool force_load)
 {
    const struct tu_image_view *iview = cmd->state.attachments[a];
    const struct tu_render_pass_attachment *attachment =
       &cmd->state.pass->attachments[a];
 
+   bool load_common = attachment->load || force_load;
+   bool load_stencil =
+      attachment->load_stencil ||
+      (attachment->format == VK_FORMAT_D32_SFLOAT_S8_UINT && force_load);
+
+   if (!load_common && !load_stencil)
+      return;
+
    trace_start_gmem_load(&cmd->trace, cs);
 
-   if (attachment->load || force_load)
+   /* If attachment will be cleared by vkCmdClearAttachments - it is likely
+    * that it would be partially cleared, and since it is done by 2d blit
+    * it doesn't produce geometry, so we have to unconditionally load.
+    *
+    * To simplify conditions treat partially cleared separate DS as fully
+    * cleared and don't emit cond_exec.
+    */
+   bool cond_exec = cond_exec_allowed &&
+                    !attachment->clear_mask &&
+                    !cmd->state.attachment_cmd_clear[a] &&
+                    !attachment->will_be_resolved;
+   if (cond_exec)
+      tu_begin_load_store_cond_exec(cmd, cs, true);
+
+   if (load_common)
       tu_emit_blit(cmd, cs, iview, attachment, false, false);
 
-   if (attachment->load_stencil || (attachment->format == VK_FORMAT_D32_SFLOAT_S8_UINT && force_load))
+   if (load_stencil)
       tu_emit_blit(cmd, cs, iview, attachment, false, true);
+
+   if (cond_exec)
+      tu_end_load_store_cond_exec(cmd, cs, true);
 
    trace_end_gmem_load(&cmd->trace, cs, attachment->format, force_load);
 }
@@ -2919,7 +3001,8 @@ void
 tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
                          struct tu_cs *cs,
                          uint32_t a,
-                         uint32_t gmem_a)
+                         uint32_t gmem_a,
+                         bool cond_exec_allowed)
 {
    struct tu_physical_device *phys_dev = cmd->device->physical_device;
    const VkRect2D *render_area = &cmd->state.render_area;
@@ -2929,6 +3012,15 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
 
    if (!dst->store && !dst->store_stencil)
       return;
+
+   bool was_cleared = src->clear_mask || cmd->state.attachment_cmd_clear[a];
+   /* Unconditional store should happen only if attachment was cleared,
+    * which could have happened either by load_op or via vkCmdClearAttachments.
+    */
+   bool cond_exec = cond_exec_allowed && !was_cleared;
+   if (cond_exec) {
+      tu_begin_load_store_cond_exec(cmd, cs, false);
+   }
 
    uint32_t x1 = render_area->offset.x;
    uint32_t y1 = render_area->offset.y;
@@ -2971,6 +3063,10 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
       if (store_separate_stencil)
          tu_emit_blit(cmd, cs, iview, src, true, true);
 
+      if (cond_exec) {
+         tu_end_load_store_cond_exec(cmd, cs, false);
+      }
+
       trace_end_gmem_store(&cmd->trace, cs, dst->format, true, false);
       return;
    }
@@ -3009,6 +3105,10 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
          store_cp_blit(cmd, cs, iview, src->samples, true, PIPE_FORMAT_S8_UINT,
                        src->gmem_offset_stencil, src->samples);
       }
+   }
+
+   if (cond_exec) {
+      tu_end_load_store_cond_exec(cmd, cs, false);
    }
 
    trace_end_gmem_store(&cmd->trace, cs, dst->format, false, unaligned);

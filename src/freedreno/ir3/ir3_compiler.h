@@ -198,6 +198,11 @@ struct ir3_compiler_options {
     * constants for it can be pre-baked when compiling the shader.
     */
    bool push_ubo_with_preamble;
+
+   /* If true, disable the shader cache. The driver is then responsible for
+    * caching.
+    */
+   bool disable_cache;
 };
 
 void ir3_compiler_destroy(struct ir3_compiler *compiler);
@@ -208,15 +213,20 @@ struct ir3_compiler *ir3_compiler_create(struct fd_device *dev,
 void ir3_disk_cache_init(struct ir3_compiler *compiler);
 void ir3_disk_cache_init_shader_key(struct ir3_compiler *compiler,
                                     struct ir3_shader *shader);
-bool ir3_disk_cache_retrieve(struct ir3_compiler *compiler,
+struct ir3_shader_variant *ir3_retrieve_variant(struct blob_reader *blob,
+                                                struct ir3_compiler *compiler,
+                                                void *mem_ctx);
+void ir3_store_variant(struct blob *blob, struct ir3_shader_variant *v);
+bool ir3_disk_cache_retrieve(struct ir3_shader *shader,
                              struct ir3_shader_variant *v);
-void ir3_disk_cache_store(struct ir3_compiler *compiler,
+void ir3_disk_cache_store(struct ir3_shader *shader,
                           struct ir3_shader_variant *v);
 
 const nir_shader_compiler_options *
 ir3_get_compiler_options(struct ir3_compiler *compiler);
 
 int ir3_compile_shader_nir(struct ir3_compiler *compiler,
+                           struct ir3_shader *shader,
                            struct ir3_shader_variant *so);
 
 /* gpu pointer size in units of 32bit registers/slots */

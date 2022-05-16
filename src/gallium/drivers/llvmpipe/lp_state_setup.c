@@ -28,7 +28,6 @@
 
 #include "util/u_math.h"
 #include "util/u_memory.h"
-#include "util/simple_list.h"
 #include "util/os_time.h"
 #include "gallivm/lp_bld_arit.h"
 #include "gallivm/lp_bld_bitarit.h"
@@ -111,7 +110,7 @@ store_coef(struct gallivm_state *gallivm,
 
 
 
-static void 
+static void
 emit_constant_coef4(struct gallivm_state *gallivm,
                     struct lp_setup_args *args,
                     unsigned slot,
@@ -126,7 +125,7 @@ emit_constant_coef4(struct gallivm_state *gallivm,
  * Setup the fragment input attribute with the front-facing value.
  * \param frontface  is the triangle front facing?
  */
-static void 
+static void
 emit_facing_coef(struct gallivm_state *gallivm,
                  struct lp_setup_args *args,
                  unsigned slot )
@@ -257,7 +256,7 @@ lp_do_offset_tri(struct gallivm_state *gallivm,
 
    /* mult = MAX2(dzdx, dzdy) * pgon_offset_scale */
    max = LLVMBuildFCmp(b, LLVMRealUGT, dzdx, dzdy, "");
-   max_value = LLVMBuildSelect(b, max, dzdx, dzdy, "max"); 
+   max_value = LLVMBuildSelect(b, max, dzdx, dzdy, "max");
 
    mult = LLVMBuildFMul(b, max_value,
                         lp_build_const_float(gallivm, key->pgon_offset_scale), "");
@@ -367,7 +366,7 @@ load_attribute(struct gallivm_state *gallivm,
  * sometimes completely in case of tris covering a block fully,
  * which obviously wouldn't work)).
  */
-static void 
+static void
 calc_coef4( struct gallivm_state *gallivm,
             struct lp_setup_args *args,
             LLVMValueRef a0,
@@ -425,7 +424,7 @@ emit_coef4( struct gallivm_state *gallivm,
 }
 
 
-static void 
+static void
 emit_linear_coef( struct gallivm_state *gallivm,
                   struct lp_setup_args *args,
                   unsigned slot,
@@ -433,7 +432,7 @@ emit_linear_coef( struct gallivm_state *gallivm,
 {
    /* nothing to do anymore */
    emit_coef4(gallivm,
-              args, slot, 
+              args, slot,
               attribv[0],
               attribv[1],
               attribv[2]);
@@ -448,7 +447,7 @@ emit_linear_coef( struct gallivm_state *gallivm,
  * Later, when we compute the value at a particular fragment position we'll
  * divide the interpolated value by the interpolated W at that fragment.
  */
-static void 
+static void
 apply_perspective_corr( struct gallivm_state *gallivm,
                         struct lp_setup_args *args,
                         unsigned slot,
@@ -474,7 +473,7 @@ apply_perspective_corr( struct gallivm_state *gallivm,
 /**
  * Compute the inputs-> dadx, dady, a0 values.
  */
-static void 
+static void
 emit_tri_coef( struct gallivm_state *gallivm,
                const struct lp_setup_variant_key *key,
                struct lp_setup_args *args)
@@ -833,7 +832,7 @@ remove_setup_variant(struct llvmpipe_context *lp,
       gallivm_destroy(variant->gallivm);
    }
 
-   remove_from_list(&variant->list_item_global);
+   list_del(&variant->list_item_global.list);
    lp->nr_setup_variants--;
    FREE(variant);
 }
@@ -858,10 +857,11 @@ cull_setup_variants(struct llvmpipe_context *lp)
 
    for (i = 0; i < LP_MAX_SETUP_VARIANTS / 4; i++) {
       struct lp_setup_variant_list_item *item;
-      if (is_empty_list(&lp->setup_variants_list)) {
+      if (list_is_empty(&lp->setup_variants_list.list)) {
          break;
       }
-      item = last_elem(&lp->setup_variants_list);
+      item = list_last_entry(&lp->setup_variants_list.list,
+                             struct lp_setup_variant_list_item, list);
       assert(item);
       assert(item->base);
       remove_setup_variant(lp, item->base);
@@ -874,7 +874,7 @@ cull_setup_variants(struct llvmpipe_context *lp)
  * prior to drawing something when some fragment-related state has
  * changed.
  */
-void 
+void
 llvmpipe_update_setup(struct llvmpipe_context *lp)
 {
    struct lp_setup_variant_key *key = &lp->setup_variant.key;
@@ -883,7 +883,7 @@ llvmpipe_update_setup(struct llvmpipe_context *lp)
 
    lp_make_setup_variant_key(lp, key);
 
-   foreach(li, &lp->setup_variants_list) {
+   LIST_FOR_EACH_ENTRY(li, &lp->setup_variants_list.list, list) {
       if(li->base->key.size == key->size &&
          memcmp(&li->base->key, key, key->size) == 0) {
          variant = li->base;
@@ -892,7 +892,7 @@ llvmpipe_update_setup(struct llvmpipe_context *lp)
    }
 
    if (variant) {
-      move_to_head(&lp->setup_variants_list, &variant->list_item_global);
+      list_move_to(&variant->list_item_global.list, &lp->setup_variants_list.list);
    }
    else {
       if (lp->nr_setup_variants >= LP_MAX_SETUP_VARIANTS) {
@@ -901,7 +901,7 @@ llvmpipe_update_setup(struct llvmpipe_context *lp)
 
       variant = generate_setup_variant(key, lp);
       if (variant) {
-         insert_at_head(&lp->setup_variants_list, &variant->list_item_global);
+         list_add(&variant->list_item_global.list, &lp->setup_variants_list.list);
          lp->nr_setup_variants++;
       }
    }
@@ -912,12 +912,9 @@ llvmpipe_update_setup(struct llvmpipe_context *lp)
 void
 lp_delete_setup_variants(struct llvmpipe_context *lp)
 {
-   struct lp_setup_variant_list_item *li;
-   li = first_elem(&lp->setup_variants_list);
-   while(!at_end(&lp->setup_variants_list, li)) {
-      struct lp_setup_variant_list_item *next = next_elem(li);
+   struct lp_setup_variant_list_item *li, *next;
+   LIST_FOR_EACH_ENTRY_SAFE(li, next, &lp->setup_variants_list.list, list) {
       remove_setup_variant(lp, li->base);
-      li = next;
    }
 }
 

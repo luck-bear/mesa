@@ -404,7 +404,7 @@ panvk_meta_copy_img2img_shader(struct panfrost_device *pdev,
       nir_variable_create(b.shader, nir_var_shader_in,
                           glsl_vector_type(GLSL_TYPE_FLOAT, texdim + texisarray),
                           "coord");
-   coord_var->data.location = VARYING_SLOT_TEX0;
+   coord_var->data.location = VARYING_SLOT_VAR0;
    nir_ssa_def *coord = nir_f2u32(&b, nir_load_var(&b, coord_var));
 
    nir_tex_instr *tex = nir_tex_instr_create(b.shader, is_ms ? 2 : 1);
@@ -971,7 +971,7 @@ panvk_meta_copy_buf2img_shader(struct panfrost_device *pdev,
       nir_variable_create(b.shader, nir_var_shader_in,
                           glsl_vector_type(GLSL_TYPE_FLOAT, 3),
                           "coord");
-   coord_var->data.location = VARYING_SLOT_TEX0;
+   coord_var->data.location = VARYING_SLOT_VAR0;
    nir_ssa_def *coord = nir_load_var(&b, coord_var);
 
    coord = nir_f2u32(&b, coord);
@@ -1154,7 +1154,7 @@ panvk_meta_copy_buf2img(struct panvk_cmd_buffer *cmdbuf,
 
    unsigned buftexelsz = panvk_meta_copy_buf_texelsize(key.imgfmt, key.mask);
    struct panvk_meta_copy_buf2img_info info = {
-      .buf.ptr = buf->bo->ptr.gpu + buf->bo_offset + region->bufferOffset,
+      .buf.ptr = panvk_buffer_gpu_ptr(buf, region->bufferOffset),
       .buf.stride.line = (region->bufferRowLength ? : region->imageExtent.width) * buftexelsz,
    };
 
@@ -1598,7 +1598,7 @@ panvk_meta_copy_img2buf(struct panvk_cmd_buffer *cmdbuf,
       &cmdbuf->device->physical_device->meta.copy.img2buf[texdimidx][fmtidx].pushmap;
 
    struct panvk_meta_copy_img2buf_info info = {
-      .buf.ptr = buf->bo->ptr.gpu + buf->bo_offset + region->bufferOffset,
+      .buf.ptr = panvk_buffer_gpu_ptr(buf, region->bufferOffset),
       .buf.stride.line = (region->bufferRowLength ? : region->imageExtent.width) * buftexelsz,
       .img.offset.x = MAX2(region->imageOffset.x & ~15, 0),
       .img.extent.minx = MAX2(region->imageOffset.x, 0),
@@ -1832,8 +1832,8 @@ panvk_meta_copy_buf2buf(struct panvk_cmd_buffer *cmdbuf,
    struct panfrost_device *pdev = &cmdbuf->device->physical_device->pdev;
 
    struct panvk_meta_copy_buf2buf_info info = {
-      .src = src->bo->ptr.gpu + src->bo_offset + region->srcOffset,
-      .dst = dst->bo->ptr.gpu + dst->bo_offset + region->dstOffset,
+      .src = panvk_buffer_gpu_ptr(src, region->srcOffset),
+      .dst = panvk_buffer_gpu_ptr(dst, region->dstOffset),
    };
 
    unsigned alignment = ffs((info.src | info.dst | region->size) & 15);
@@ -1994,13 +1994,21 @@ panvk_meta_fill_buf(struct panvk_cmd_buffer *cmdbuf,
 {
    struct panfrost_device *pdev = &cmdbuf->device->physical_device->pdev;
 
-   if (size == VK_WHOLE_SIZE)
-      size = (dst->size - offset) & ~3ULL;
-
    struct panvk_meta_fill_buf_info info = {
-      .start = dst->bo->ptr.gpu + dst->bo_offset + offset,
+      .start = panvk_buffer_gpu_ptr(dst, offset),
       .val = val,
    };
+   size = panvk_buffer_range(dst, offset, size);
+
+   /* From the Vulkan spec:
+    *
+    *    "size is the number of bytes to fill, and must be either a multiple
+    *    of 4, or VK_WHOLE_SIZE to fill the range from offset to the end of
+    *    the buffer. If VK_WHOLE_SIZE is used and the remaining size of the
+    *    buffer is not a multiple of 4, then the nearest smaller multiple is
+    *    used."
+    */
+   size &= ~3ull;
 
    assert(!(offset & 3) && !(size & 3));
 
@@ -2060,7 +2068,7 @@ panvk_meta_update_buf(struct panvk_cmd_buffer *cmdbuf,
 
    struct panvk_meta_copy_buf2buf_info info = {
       .src = pan_pool_upload_aligned(&cmdbuf->desc_pool.base, data, size, 4),
-      .dst = dst->bo->ptr.gpu + dst->bo_offset + offset,
+      .dst = panvk_buffer_gpu_ptr(dst, offset),
    };
 
    unsigned log2blksz = ffs(sizeof(uint32_t)) - 1;

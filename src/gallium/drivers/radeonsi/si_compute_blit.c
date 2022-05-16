@@ -32,10 +32,10 @@
 static enum si_cache_policy get_cache_policy(struct si_context *sctx, enum si_coherency coher,
                                              uint64_t size)
 {
-   if ((sctx->chip_class >= GFX9 && (coher == SI_COHERENCY_CB_META ||
+   if ((sctx->gfx_level >= GFX9 && (coher == SI_COHERENCY_CB_META ||
                                      coher == SI_COHERENCY_DB_META ||
                                      coher == SI_COHERENCY_CP)) ||
-       (sctx->chip_class >= GFX7 && coher == SI_COHERENCY_SHADER))
+       (sctx->gfx_level >= GFX7 && coher == SI_COHERENCY_SHADER))
       return L2_LRU; /* it's faster if L2 doesn't evict anything  */
 
    return L2_BYPASS;
@@ -152,7 +152,7 @@ void si_launch_grid_internal(struct si_context *sctx, struct pipe_grid_info *inf
 
       if (flags & SI_OP_CS_IMAGE) {
          /* Make sure image stores are visible to CB, which doesn't use L2 on GFX6-8. */
-         sctx->flags |= sctx->chip_class <= GFX8 ? SI_CONTEXT_WB_L2 : 0;
+         sctx->flags |= sctx->gfx_level <= GFX8 ? SI_CONTEXT_WB_L2 : 0;
          /* Make sure image stores are visible to all CUs. */
          sctx->flags |= SI_CONTEXT_INV_VCACHE;
       } else {
@@ -386,7 +386,7 @@ void si_clear_buffer(struct si_context *sctx, struct pipe_resource *dst,
    if (aligned_size >= 4) {
       uint64_t compute_min_size;
 
-      if (sctx->chip_class <= GFX8) {
+      if (sctx->gfx_level <= GFX8) {
          /* CP DMA clears are terribly slow with GTT on GFX6-8, which can always
           * happen due to BO evictions.
           */
@@ -396,6 +396,7 @@ void si_clear_buffer(struct si_context *sctx, struct pipe_resource *dst,
          compute_min_size = 4 * 1024;
       }
 
+      /* TODO: use compute for unaligned big sizes */
       if (method == SI_AUTO_SELECT_CLEAR_METHOD && (
            clear_value_size > 4 ||
            (clear_value_size == 4 && offset % 4 == 0 && size > compute_min_size))) {
@@ -464,6 +465,7 @@ void si_copy_buffer(struct si_context *sctx, struct pipe_resource *dst, struct p
    si_improve_sync_flags(sctx, dst, src, &flags);
 
    /* Only use compute for VRAM copies on dGPUs. */
+   /* TODO: use compute for unaligned big sizes */
    if (sctx->screen->info.has_dedicated_vram && si_resource(dst)->domains & RADEON_DOMAIN_VRAM &&
        si_resource(src)->domains & RADEON_DOMAIN_VRAM && size > compute_min_size &&
        dst_offset % 4 == 0 && src_offset % 4 == 0 && size % 4 == 0) {
@@ -498,22 +500,18 @@ void si_compute_copy_image(struct si_context *sctx, struct pipe_resource *dst, u
    struct pipe_context *ctx = &sctx->b;
    struct si_texture *ssrc = (struct si_texture*)src;
    struct si_texture *sdst = (struct si_texture*)dst;
-   unsigned width = src_box->width;
-   unsigned height = src_box->height;
-   unsigned depth = src_box->depth;
    enum pipe_format src_format = util_format_linear(src->format);
    enum pipe_format dst_format = util_format_linear(dst->format);
    bool is_linear = ssrc->surface.is_linear || sdst->surface.is_linear;
-   bool is_1D = dst->target == PIPE_TEXTURE_1D_ARRAY && src->target == PIPE_TEXTURE_1D_ARRAY;
 
    assert(util_format_is_subsampled_422(src_format) == util_format_is_subsampled_422(dst_format));
 
+   /* Interpret as integer values to avoid NaN issues */
    if (!vi_dcc_enabled(ssrc, src_level) &&
        !vi_dcc_enabled(sdst, dst_level) &&
        src_format == dst_format &&
        util_format_is_float(src_format) &&
        !util_format_is_compressed(src_format)) {
-      /* Interpret as integer values to avoid NaN issues */
       switch(util_format_get_blocksizebits(src_format)) {
         case 16:
           src_format = dst_format = PIPE_FORMAT_R16_UINT;
@@ -532,8 +530,49 @@ void si_compute_copy_image(struct si_context *sctx, struct pipe_resource *dst, u
       }
    }
 
+   /* Interpret compressed formats as UINT. */
+   struct pipe_box new_box;
+   unsigned src_access = 0, dst_access = 0;
+
+   /* Note that staging copies do compressed<->UINT, so one of the formats is already UINT. */
+   if (util_format_is_compressed(src_format) || util_format_is_compressed(dst_format)) {
+      if (util_format_is_compressed(src_format))
+         src_access |= SI_IMAGE_ACCESS_BLOCK_FORMAT_AS_UINT;
+      if (util_format_is_compressed(dst_format))
+         dst_access |= SI_IMAGE_ACCESS_BLOCK_FORMAT_AS_UINT;
+
+      dstx = util_format_get_nblocksx(dst_format, dstx);
+      dsty = util_format_get_nblocksy(dst_format, dsty);
+
+      new_box.x = util_format_get_nblocksx(src_format, src_box->x);
+      new_box.y = util_format_get_nblocksy(src_format, src_box->y);
+      new_box.z = src_box->z;
+      new_box.width = util_format_get_nblocksx(src_format, src_box->width);
+      new_box.height = util_format_get_nblocksy(src_format, src_box->height);
+      new_box.depth = src_box->depth;
+      src_box = &new_box;
+
+      if (ssrc->surface.bpe == 8)
+         src_format = dst_format = PIPE_FORMAT_R16G16B16A16_UINT; /* 64-bit block */
+      else
+         src_format = dst_format = PIPE_FORMAT_R32G32B32A32_UINT; /* 128-bit block */
+   }
+
    if (util_format_is_subsampled_422(src_format)) {
+      assert(src_format == dst_format);
+
+      src_access |= SI_IMAGE_ACCESS_BLOCK_FORMAT_AS_UINT;
+      dst_access |= SI_IMAGE_ACCESS_BLOCK_FORMAT_AS_UINT;
+
+      dstx = util_format_get_nblocksx(src_format, dstx);
+
+      new_box = *src_box;
+      new_box.x = util_format_get_nblocksx(src_format, src_box->x);
+      new_box.width = util_format_get_nblocksx(src_format, src_box->width);
+      src_box = &new_box;
+
       src_format = dst_format = PIPE_FORMAT_R32_UINT;
+
       /* Interpreting 422 subsampled format (16 bpp) as 32 bpp
        * should force us to divide src_box->x, dstx and width by 2.
        * But given that ac_surface allocates this format as 32 bpp
@@ -542,7 +581,18 @@ void si_compute_copy_image(struct si_context *sctx, struct pipe_resource *dst, u
        */
    }
 
-   if (width == 0 || height == 0)
+   /* SNORM blitting has precision issues. Use the SINT equivalent instead, which doesn't
+    * force DCC decompression.
+    */
+   if (util_format_is_snorm(dst_format))
+      src_format = dst_format = util_format_snorm_to_sint(dst_format);
+
+   assert(ctx->screen->is_format_supported(ctx->screen, src_format, src->target, src->nr_samples,
+                                           src->nr_storage_samples, PIPE_BIND_SHADER_IMAGE));
+   assert(ctx->screen->is_format_supported(ctx->screen, dst_format, dst->target, dst->nr_samples,
+                                           dst->nr_storage_samples, PIPE_BIND_SHADER_IMAGE));
+
+   if (src_box->width == 0 || src_box->height == 0 || src_box->depth == 0)
       return;
 
    /* The driver doesn't decompress resources automatically here. */
@@ -554,7 +604,7 @@ void si_compute_copy_image(struct si_context *sctx, struct pipe_resource *dst, u
    /* src and dst have the same number of samples. */
    si_make_CB_shader_coherent(sctx, src->nr_samples, true,
                               ssrc->surface.u.gfx9.color.dcc.pipe_aligned);
-   if (sctx->chip_class >= GFX10) {
+   if (sctx->gfx_level >= GFX10) {
       /* GFX10+ uses DCC stores so si_make_CB_shader_coherent is required for dst too */
       si_make_CB_shader_coherent(sctx, dst->nr_samples, true,
                                  sdst->surface.u.gfx9.color.dcc.pipe_aligned);
@@ -567,30 +617,21 @@ void si_compute_copy_image(struct si_context *sctx, struct pipe_resource *dst, u
 
    struct pipe_image_view image[2] = {0};
    image[0].resource = src;
-   image[0].shader_access = image[0].access = PIPE_IMAGE_ACCESS_READ;
+   image[0].shader_access = image[0].access = PIPE_IMAGE_ACCESS_READ | src_access;
    image[0].format = src_format;
    image[0].u.tex.level = src_level;
    image[0].u.tex.first_layer = 0;
-   image[0].u.tex.last_layer = src->target == PIPE_TEXTURE_3D ? u_minify(src->depth0, src_level) - 1
-                                                              : (unsigned)(src->array_size - 1);
+   image[0].u.tex.last_layer = util_max_layer(src, src_level);
    image[1].resource = dst;
-   image[1].shader_access = image[1].access = PIPE_IMAGE_ACCESS_WRITE;
+   image[1].shader_access = image[1].access = PIPE_IMAGE_ACCESS_WRITE | dst_access;
    image[1].format = dst_format;
    image[1].u.tex.level = dst_level;
    image[1].u.tex.first_layer = 0;
-   image[1].u.tex.last_layer = dst->target == PIPE_TEXTURE_3D ? u_minify(dst->depth0, dst_level) - 1
-                                                              : (unsigned)(dst->array_size - 1);
-
-   /* SNORM8 blitting has precision issues on some chips. Use the SINT
-    * equivalent instead, which doesn't force DCC decompression.
-    */
-   if (util_format_is_snorm8(dst->format)) {
-      image[0].format = image[1].format = util_format_snorm8_to_sint8(dst->format);
-   }
+   image[1].u.tex.last_layer = util_max_layer(dst, dst_level);
 
    if (is_dcc_decompress)
       image[1].access |= SI_IMAGE_ACCESS_DCC_OFF;
-   else if (sctx->chip_class >= GFX10)
+   else if (sctx->gfx_level >= GFX10)
       image[1].access |= SI_IMAGE_ACCESS_ALLOW_DCC_STORE;
 
    ctx->set_shader_images(ctx, PIPE_SHADER_COMPUTE, 0, 2, 0, image);
@@ -624,31 +665,38 @@ void si_compute_copy_image(struct si_context *sctx, struct pipe_resource *dst, u
 
       si_launch_grid_internal(sctx, &info, sctx->cs_dcc_decompress, flags | SI_OP_CS_IMAGE);
    } else {
-      sctx->cs_user_data[0] = src_box->x | (dstx << 16);
-
-      int block_x = is_1D || is_linear ? 64 : 8;
-      int block_y = is_1D || is_linear ? 1 : 8;
+      bool dst_is_1d = dst->target == PIPE_TEXTURE_1D ||
+                       dst->target == PIPE_TEXTURE_1D_ARRAY;
+      bool src_is_1d = src->target == PIPE_TEXTURE_1D ||
+                       src->target == PIPE_TEXTURE_1D_ARRAY;
+      int block_x, block_y;
       int block_z = 1;
 
-      if (is_1D) {
-         assert(height == 1); /* height is not used for 1D images */
-         assert(src_box->y == 0 && dsty == 0);
-
-         sctx->cs_user_data[1] = src_box->z | (dstz << 16);
-
-         /* We pass array index in 'y' for 1D images. */
-         height = depth;
-         depth = 1;
+      /* Choose the block dimensions based on the copy area size. */
+      if (src_box->height <= 4) {
+         block_y = util_next_power_of_two(src_box->height);
+         block_x = 64 / block_y;
+      } else if (src_box->width <= 4) {
+         block_x = util_next_power_of_two(src_box->width);
+         block_y = 64 / block_x;
+      } else if (is_linear) {
+         block_x = 64;
+         block_y = 1;
       } else {
-         sctx->cs_user_data[1] = src_box->y | (dsty << 16);
-         sctx->cs_user_data[2] = src_box->z | (dstz << 16);
+         block_x = 8;
+         block_y = 8;
       }
 
-      set_work_size(&info, block_x, block_y, block_z, width, height, depth);
+      sctx->cs_user_data[0] = src_box->x | (dstx << 16);
+      sctx->cs_user_data[1] = src_box->y | (dsty << 16);
+      sctx->cs_user_data[2] = src_box->z | (dstz << 16);
 
-      void **copy_image_cs_ptr = is_1D ? &sctx->cs_copy_image_1D : &sctx->cs_copy_image_2D;
+      set_work_size(&info, block_x, block_y, block_z,
+                    src_box->width, src_box->height, src_box->depth);
+
+      void **copy_image_cs_ptr = &sctx->cs_copy_image[src_is_1d][dst_is_1d];
       if (!*copy_image_cs_ptr)
-         *copy_image_cs_ptr = si_create_copy_image_cs(sctx, is_1D);
+         *copy_image_cs_ptr = si_create_copy_image_cs(sctx, src_is_1d, dst_is_1d);
 
       assert(*copy_image_cs_ptr);
 
@@ -711,6 +759,8 @@ void gfx9_clear_dcc_msaa(struct si_context *sctx, struct pipe_resource *res, uin
 {
    struct si_texture *tex = (struct si_texture*)res;
 
+   assert(sctx->gfx_level < GFX11);
+
    /* Set the DCC buffer. */
    assert(tex->surface.meta_offset && tex->surface.meta_offset <= UINT_MAX);
    assert(tex->buffer.bo_size <= UINT_MAX);
@@ -762,6 +812,8 @@ void si_compute_expand_fmask(struct pipe_context *ctx, struct pipe_resource *tex
    unsigned log_fragments = util_logbase2(tex->nr_storage_samples);
    unsigned log_samples = util_logbase2(tex->nr_samples);
    assert(tex->nr_samples >= 2);
+
+   assert(sctx->gfx_level < GFX11);
 
    /* EQAA FMASK expansion is unimplemented. */
    if (tex->nr_samples != tex->nr_storage_samples)

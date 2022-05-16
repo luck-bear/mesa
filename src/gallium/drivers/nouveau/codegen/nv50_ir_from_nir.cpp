@@ -30,6 +30,7 @@
 #include "codegen/nv50_ir.h"
 #include "codegen/nv50_ir_from_common.h"
 #include "codegen/nv50_ir_lowering_helper.h"
+#include "codegen/nv50_ir_target.h"
 #include "codegen/nv50_ir_util.h"
 #include "tgsi/tgsi_from_mesa.h"
 
@@ -433,6 +434,9 @@ Converter::getOperation(nir_op op)
    case nir_op_ffloor:
       return OP_FLOOR;
    case nir_op_ffma:
+      /* No FMA op pre-nvc0 */
+      if (info->target < 0xc0)
+         return OP_MAD;
       return OP_FMA;
    case nir_op_flog2:
       return OP_LG2;
@@ -848,6 +852,7 @@ uint32_t
 Converter::getIndirect(nir_intrinsic_instr *insn, uint8_t s, uint8_t c, Value *&indirect, bool isScalar)
 {
    int32_t idx = nir_intrinsic_base(insn) + getIndirect(&insn->src[s], c, indirect);
+
    if (indirect && !isScalar)
       indirect = mkOp2v(OP_SHL, TYPE_U32, getSSA(4, FILE_ADDRESS), indirect, loadImm(NULL, 4));
    return idx;
@@ -1000,18 +1005,20 @@ bool Converter::assignSlots() {
    BITSET_FOREACH_SET(i, nir->info.system_values_read, SYSTEM_VALUE_MAX) {
       info_out->sv[info_out->numSysVals].sn = tgsi_get_sysval_semantic(i);
       info_out->sv[info_out->numSysVals].si = 0;
-      info_out->sv[info_out->numSysVals].input = 0; // TODO inferSysValDirection(sn);
+      info_out->sv[info_out->numSysVals].input = 0;
 
       switch (i) {
+      case SYSTEM_VALUE_VERTEX_ID:
+         info_out->sv[info_out->numSysVals].input = 1;
+         info_out->io.vertexId = info_out->numSysVals;
+         break;
       case SYSTEM_VALUE_INSTANCE_ID:
+         info_out->sv[info_out->numSysVals].input = 1;
          info_out->io.instanceId = info_out->numSysVals;
          break;
       case SYSTEM_VALUE_TESS_LEVEL_INNER:
       case SYSTEM_VALUE_TESS_LEVEL_OUTER:
          info_out->sv[info_out->numSysVals].patch = 1;
-         break;
-      case SYSTEM_VALUE_VERTEX_ID:
-         info_out->io.vertexId = info_out->numSysVals;
          break;
       default:
          break;
@@ -1028,7 +1035,6 @@ bool Converter::assignSlots() {
       int slot = var->data.location;
       uint16_t slots = calcSlots(type, prog->getType(), nir->info, true, var);
       uint32_t vary = var->data.driver_location;
-
       assert(vary + slots <= PIPE_MAX_SHADER_INPUTS);
 
       switch(prog->getType()) {
@@ -1052,7 +1058,7 @@ bool Converter::assignSlots() {
             info_out->numPatchConstants = MAX2(info_out->numPatchConstants, index + slots);
          break;
       case Program::TYPE_VERTEX:
-         if (slot >= VERT_ATTRIB_GENERIC0)
+         if (slot >= VERT_ATTRIB_GENERIC0 && slot < VERT_ATTRIB_GENERIC0 + VERT_ATTRIB_GENERIC_MAX)
             slot = VERT_ATTRIB_GENERIC0 + vary;
          vert_attrib_to_tgsi_semantic((gl_vert_attrib)slot, &name, &index);
          switch (name) {
@@ -1235,7 +1241,7 @@ Converter::loadFrom(DataFile file, uint8_t i, DataType ty, Value *def,
    unsigned int tySize = typeSizeof(ty);
 
    if (tySize == 8 &&
-       (file == FILE_MEMORY_CONST || file == FILE_MEMORY_BUFFER || indirect0)) {
+       (indirect0 || !prog->getTarget()->isAccessSupported(file, TYPE_U64))) {
       Value *lo = getSSA();
       Value *hi = getSSA();
 
@@ -1295,7 +1301,7 @@ Converter::storeTo(nir_intrinsic_instr *insn, DataFile file, operation op,
 bool
 Converter::parseNIR()
 {
-   info_out->bin.tlsSpace = nir->scratch_size;
+   info_out->bin.tlsSpace = ALIGN(nir->scratch_size, 0x10);
    info_out->io.clipDistances = nir->info.clip_distance_array_size;
    info_out->io.cullDistances = nir->info.cull_distance_array_size;
    info_out->io.layer_viewport_relative = nir->info.layer_viewport_relative;
@@ -1306,6 +1312,23 @@ Converter::parseNIR()
       info->prop.cp.numThreads[1] = nir->info.workgroup_size[1];
       info->prop.cp.numThreads[2] = nir->info.workgroup_size[2];
       info_out->bin.smemSize = std::max(info_out->bin.smemSize, nir->info.shared_size);
+
+      if (info->target < NVISA_GF100_CHIPSET) {
+         int gmemSlot = 0;
+
+         for (unsigned i = 0; i < nir->info.num_ssbos; i++) {
+            info_out->prop.cp.gmem[gmemSlot++] = {.valid = 1, .image = 0, .slot = i};
+            assert(gmemSlot < 16);
+         }
+         nir_foreach_image_variable(var, nir) {
+            int image_count = glsl_type_get_image_count(var->type);
+            for (int i = 0; i < image_count; i++) {
+               info_out->prop.cp.gmem[gmemSlot++] = {.valid = 1, .image = 1, .slot = var->data.binding + i};
+               assert(gmemSlot < 16);
+            }
+         }
+      }
+
       break;
    case Program::TYPE_FRAGMENT:
       info_out->prop.fp.earlyFragTests = nir->info.fs.early_fragment_tests;
@@ -1317,7 +1340,7 @@ Converter::parseNIR()
          BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_POS);
       info_out->prop.fp.usesDiscard = nir->info.fs.uses_discard || nir->info.fs.uses_demote;
       info_out->prop.fp.usesSampleMaskIn =
-         !BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_MASK_IN);
+         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_MASK_IN);
       break;
    case Program::TYPE_GEOMETRY:
       info_out->prop.gp.instanceCount = nir->info.gs.invocations;
@@ -1482,9 +1505,9 @@ Converter::visit(nir_if *nif)
       insertJoins = insertJoins && bb->getExit()->op == OP_BRA;
    }
 
-   /* only insert joins for the most outer if */
-   if (--curIfDepth)
+   if (curIfDepth > 6) {
       insertJoins = false;
+   }
 
    /* we made sure that all threads would converge at the same block */
    if (insertJoins) {
@@ -1494,6 +1517,8 @@ Converter::visit(nir_if *nif)
       setPosition(conv, false);
       mkFlow(OP_JOIN, NULL, CC_ALWAYS, NULL)->fixed = 1;
    }
+
+   curIfDepth--;
 
    return true;
 }
@@ -1528,6 +1553,8 @@ Converter::visit(nir_loop *loop)
       loopBB->cfg.attach(&tailBB->cfg, Graph::Edge::TREE);
 
    curLoopDepth -= 1;
+
+   info_out->loops++;
 
    return true;
 }
@@ -2001,6 +2028,8 @@ Converter::visit(nir_intrinsic_instr *insn)
       Value *indirectOffset;
       uint32_t index = getIndirect(&insn->src[0], 0, indirectIndex) + 1;
       uint32_t offset = getIndirect(&insn->src[1], 0, indirectOffset);
+      if (indirectOffset)
+         indirectOffset = mkOp1v(OP_MOV, TYPE_U32, getSSA(4, FILE_ADDRESS), indirectOffset);
 
       for (uint8_t i = 0u; i < dest_components; ++i) {
          loadFrom(FILE_MEMORY_CONST, index, dType, newDefs[i], offset, i,
@@ -2260,6 +2289,12 @@ Converter::visit(nir_intrinsic_instr *insn)
          indirect = getSrc(&insn->src[0], 0);
       else
          location = getIndirect(&insn->src[0], 0, indirect);
+
+      /* Pre-GF100, SSBOs and images are in the same HW file, managed by
+       * prop.cp.gmem.  images are located after SSBOs.
+       */
+      if (info->target < NVISA_GF100_CHIPSET)
+         location += nir->info.num_ssbos;
 
       // coords
       if (opInfo.num_srcs >= 2)
@@ -3112,6 +3147,36 @@ Converter::visit(nir_tex_instr *insn)
    return true;
 }
 
+/* nouveau's RA doesn't track the liveness of exported registers in the fragment
+ * shader, so we need all the store_outputs to appear at the end of the shader
+ * with no other instructions that might generate a temp value in between them.
+ */
+static void
+nv_nir_move_stores_to_end(nir_shader *s)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(s);
+   nir_block *block = nir_impl_last_block(impl);
+   nir_instr *first_store = NULL;
+
+   nir_foreach_instr_safe(instr, block) {
+      if (instr == first_store)
+         break;
+      if (instr->type != nir_instr_type_intrinsic)
+         continue;
+      nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+      if (intrin->intrinsic == nir_intrinsic_store_output) {
+         nir_instr_remove(instr);
+         nir_instr_insert(nir_after_block(block), instr);
+
+         if (!first_store)
+            first_store = instr;
+      }
+   }
+   nir_metadata_preserve(impl,
+                         nir_metadata_block_index |
+                         nir_metadata_dominance);
+}
+
 bool
 Converter::run()
 {
@@ -3181,6 +3246,9 @@ Converter::run()
    NIR_PASS_V(nir, nir_opt_sink, move_options);
    NIR_PASS_V(nir, nir_opt_move, move_options);
 
+   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+      NIR_PASS_V(nir, nv_nir_move_stores_to_end);
+
    NIR_PASS_V(nir, nir_lower_bool_to_int32);
    NIR_PASS_V(nir, nir_convert_from_ssa, true);
 
@@ -3249,14 +3317,14 @@ nvir_nir_shader_compiler_options(int chipset)
    op.lower_sincos = false;
    op.lower_fmod = true;
    op.lower_bitfield_extract = false;
-   op.lower_bitfield_extract_to_shifts = (chipset >= NVISA_GV100_CHIPSET);
+   op.lower_bitfield_extract_to_shifts = (chipset >= NVISA_GV100_CHIPSET || chipset < NVISA_GF100_CHIPSET);
    op.lower_bitfield_insert = false;
-   op.lower_bitfield_insert_to_shifts = (chipset >= NVISA_GV100_CHIPSET);
+   op.lower_bitfield_insert_to_shifts = (chipset >= NVISA_GV100_CHIPSET || chipset < NVISA_GF100_CHIPSET);
    op.lower_bitfield_insert_to_bitfield_select = false;
-   op.lower_bitfield_reverse = false;
-   op.lower_bit_count = false;
-   op.lower_ifind_msb = false;
-   op.lower_find_lsb = false;
+   op.lower_bitfield_reverse = (chipset < NVISA_GF100_CHIPSET);
+   op.lower_bit_count = (chipset < NVISA_GF100_CHIPSET);
+   op.lower_ifind_msb = (chipset < NVISA_GF100_CHIPSET);
+   op.lower_find_lsb = (chipset < NVISA_GF100_CHIPSET);
    op.lower_uadd_carry = true; // TODO
    op.lower_usub_borrow = true; // TODO
    op.lower_mul_high = false;

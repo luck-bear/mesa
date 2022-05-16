@@ -143,24 +143,46 @@ dxcore_get_memory_info(struct d3d12_screen *screen, struct d3d12_memory_info *ou
    output->usage = local_info.currentUsage + nonlocal_info.currentUsage;
 }
 
-struct pipe_screen *
-d3d12_create_dxcore_screen(struct sw_winsys *winsys, LUID *adapter_luid)
+static void
+d3d12_deinit_dxcore_screen(struct d3d12_screen *dscreen)
 {
-   struct d3d12_dxcore_screen *screen = CALLOC_STRUCT(d3d12_dxcore_screen);
-   if (!screen)
-      return nullptr;
+   d3d12_deinit_screen(dscreen);
+   struct d3d12_dxcore_screen *screen = d3d12_dxcore_screen(dscreen);
+   if (screen->adapter) {
+      screen->adapter->Release();
+      screen->adapter = nullptr;
+   }
+   if (screen->factory) {
+      screen->factory->Release();
+      screen->factory = nullptr;
+   }
+}
+
+static void
+d3d12_destroy_dxcore_screen(struct pipe_screen *pscreen)
+{
+   struct d3d12_screen *screen = d3d12_screen(pscreen);
+   d3d12_deinit_dxcore_screen(screen);
+   d3d12_destroy_screen(screen);
+}
+
+static bool
+d3d12_init_dxcore_screen(struct d3d12_screen *dscreen)
+{
+   struct d3d12_dxcore_screen *screen = d3d12_dxcore_screen(dscreen);
 
    screen->factory = get_dxcore_factory();
-   if (!screen->factory) {
-      FREE(screen);
-      return nullptr;
-   }
+   if (!screen->factory)
+      return false;
+
+   LUID *adapter_luid = &dscreen->adapter_luid;
+   if (adapter_luid->HighPart == 0 && adapter_luid->LowPart == 0)
+      adapter_luid = nullptr;
 
    screen->adapter = choose_dxcore_adapter(screen->factory, adapter_luid);
    if (!screen->adapter) {
       debug_printf("D3D12: no suitable adapter\n");
-      FREE(screen);
-      return nullptr;
+      return false;
    }
 
    DXCoreHardwareID hardware_ids = {};
@@ -174,8 +196,7 @@ d3d12_create_dxcore_screen(struct sw_winsys *winsys, LUID *adapter_luid)
                                            sizeof(screen->description),
                                            screen->description))) {
       debug_printf("D3D12: failed to retrieve adapter description\n");
-      FREE(screen);
-      return nullptr;
+      return false;
    }
 
    screen->base.vendor_id = hardware_ids.vendorID;
@@ -183,9 +204,28 @@ d3d12_create_dxcore_screen(struct sw_winsys *winsys, LUID *adapter_luid)
    screen->base.base.get_name = dxcore_get_name;
    screen->base.get_memory_info = dxcore_get_memory_info;
 
-   if (!d3d12_init_screen(&screen->base, winsys, screen->adapter)) {
+   if (!d3d12_init_screen(&screen->base, screen->adapter)) {
       debug_printf("D3D12: failed to initialize DXCore screen\n");
-      FREE(screen);
+      return false;
+   }
+
+   return true;
+}
+
+struct pipe_screen *
+d3d12_create_dxcore_screen(struct sw_winsys *winsys, LUID *adapter_luid)
+{
+   struct d3d12_dxcore_screen *screen = CALLOC_STRUCT(d3d12_dxcore_screen);
+   if (!screen)
+      return nullptr;
+
+   d3d12_init_screen_base(&screen->base, winsys, adapter_luid);
+   screen->base.base.destroy = d3d12_destroy_dxcore_screen;
+   screen->base.init = d3d12_init_dxcore_screen;
+   screen->base.deinit = d3d12_deinit_dxcore_screen;
+
+   if (!d3d12_init_dxcore_screen(&screen->base)) {
+      d3d12_destroy_dxcore_screen(&screen->base.base);
       return nullptr;
    }
 

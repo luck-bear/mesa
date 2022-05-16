@@ -294,6 +294,8 @@ mdg_should_scalarize(const nir_instr *instr, const void *_unused)
         case nir_op_fdot2:
         case nir_op_umul_high:
         case nir_op_imul_high:
+        case nir_op_pack_half_2x16:
+        case nir_op_unpack_half_2x16:
                 return true;
         default:
                 return false;
@@ -344,6 +346,7 @@ optimise_nir(nir_shader *nir, unsigned quirks, bool is_blend, bool is_blit)
                 .lower_tg4_broadcom_swizzle = true,
                 /* TODO: we have native gradient.. */
                 .lower_txd = true,
+                .lower_invalid_implicit_lod = true,
         };
 
         NIR_PASS(progress, nir, nir_lower_tex, &lower_tex_options);
@@ -1572,8 +1575,9 @@ emit_sysval_read(compiler_context *ctx, nir_instr *instr,
         nir_dest nir_dest;
 
         /* Figure out which uniform this is */
-        unsigned sysval_ubo =
-                MAX2(ctx->inputs->sysval_ubo, ctx->nir->info.num_ubos);
+        unsigned sysval_ubo = ctx->inputs->fixed_sysval_ubo >= 0 ?
+                              ctx->inputs->fixed_sysval_ubo :
+                              ctx->nir->info.num_ubos;
         int sysval = panfrost_sysval_for_instr(instr, &nir_dest);
         unsigned dest = nir_dest_index(&nir_dest);
         unsigned uniform =
@@ -3123,7 +3127,9 @@ midgard_compile_shader_nir(nir_shader *nir,
 
         /* TODO: Bound against what? */
         compiler_context *ctx = rzalloc(NULL, compiler_context);
-        ctx->sysval_to_id = panfrost_init_sysvals(&info->sysvals, ctx);
+        ctx->sysval_to_id = panfrost_init_sysvals(&info->sysvals,
+                                                  inputs->fixed_sysval_layout,
+                                                  ctx);
 
         ctx->inputs = inputs;
         ctx->nir = nir;

@@ -397,13 +397,7 @@ drisw_allocate_textures(struct dri_context *stctx,
       templ.nr_samples = 0;
       templ.nr_storage_samples = 0;
 
-      if (bind & PIPE_BIND_DISPLAY_TARGET &&
-          screen->base.screen->resource_create_drawable) {
-         drawable->textures[statts[i]] =
-            screen->base.screen->resource_create_drawable(screen->base.screen,
-                                                          &templ,
-                                                          drawable->dPriv);
-      } else if (statts[i] == ST_ATTACHMENT_FRONT_LEFT &&
+      if (statts[i] == ST_ATTACHMENT_FRONT_LEFT &&
                  screen->base.screen->resource_create_front &&
                  loader->base.version >= 3) {
          drawable->textures[statts[i]] =
@@ -620,11 +614,27 @@ static const struct __DRIDriverVtableExtensionRec galliumsw_vtable = {
    .vtable = &galliumsw_driver_api,
 };
 
+/* swrast copy sub buffer entrypoint. */
+static void driswCopySubBuffer(__DRIdrawable *pdp, int x, int y,
+                               int w, int h)
+{
+   assert(pdp->driScreenPriv->swrast_loader);
+
+   pdp->driScreenPriv->driver->CopySubBuffer(pdp, x, y, w, h);
+}
+
+/* for swrast only */
+const __DRIcopySubBufferExtension driSWCopySubBufferExtension = {
+   .base = { __DRI_COPY_SUB_BUFFER, 1 },
+
+   .copySubBuffer               = driswCopySubBuffer,
+};
+
 /* This is the table of extensions that the loader will dlsym() for. */
 const __DRIextension *galliumsw_driver_extensions[] = {
     &driCoreExtension.base,
     &driSWRastExtension.base,
-    &driCopySubBufferExtension.base,
+    &driSWCopySubBufferExtension.base,
     &gallium_config_options.base,
     &galliumsw_vtable.base,
     NULL

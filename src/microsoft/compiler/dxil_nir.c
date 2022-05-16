@@ -27,6 +27,7 @@
 #include "nir_deref.h"
 #include "nir_to_dxil.h"
 #include "util/u_math.h"
+#include "vulkan/vulkan_core.h"
 
 static void
 cl_type_size_align(const struct glsl_type *type, unsigned *size,
@@ -596,7 +597,7 @@ ubo_to_temp_patch_deref_mode(nir_deref_instr *deref)
    deref->modes = nir_var_shader_temp;
    nir_foreach_use(use_src, &deref->dest.ssa) {
       if (use_src->parent_instr->type != nir_instr_type_deref)
-	 continue;
+         continue;
 
       nir_deref_instr *parent = nir_instr_as_deref(use_src->parent_instr);
       ubo_to_temp_patch_deref_mode(parent);
@@ -1507,14 +1508,10 @@ redirect_sampler_derefs(struct nir_builder *b, nir_instr *instr, void *data)
 
       assert(old_sampler);
 
-      /* If it is already bare, we just need to fix the shadow information */
-      if (glsl_type_is_bare_sampler(glsl_without_array(old_sampler->type)))
-         bare_sampler = old_sampler;
-      else {
-         /* Otherwise, clone the typed sampler to a bare sampler */
-         bare_sampler = nir_variable_clone(old_sampler, b->shader);
-         nir_shader_add_variable(b->shader, bare_sampler);
-      }
+      /* Clone the original sampler to a bare sampler of the correct type */
+      bare_sampler = nir_variable_clone(old_sampler, b->shader);
+      nir_shader_add_variable(b->shader, bare_sampler);
+
       bare_sampler->type =
          get_bare_samplers_for_type(old_sampler->type, tex->is_shadow);
       _mesa_hash_table_u64_insert(data, tex->sampler_index, bare_sampler);
@@ -1540,12 +1537,8 @@ redirect_sampler_derefs(struct nir_builder *b, nir_instr *instr, void *data)
                       old_var->data.binding;
    nir_variable *new_var = _mesa_hash_table_u64_search(data, var_key);
    if (!new_var) {
-      if (glsl_type_is_bare_sampler(glsl_without_array(old_var->type)))
-         new_var = old_var;
-      else {
-         new_var = nir_variable_clone(old_var, b->shader);
-         nir_shader_add_variable(b->shader, new_var);
-      }
+      new_var = nir_variable_clone(old_var, b->shader);
+      nir_shader_add_variable(b->shader, new_var);
       new_var->type = 
          get_bare_samplers_for_type(old_var->type, tex->is_shadow);
       _mesa_hash_table_u64_insert(data, var_key, new_var);
@@ -1561,9 +1554,6 @@ redirect_sampler_derefs(struct nir_builder *b, nir_instr *instr, void *data)
 
    nir_deref_path_finish(&path);
    nir_instr_rewrite_src_ssa(&tex->instr, &tex->src[sampler_idx].src, &new_tail->dest.ssa);
-   /* Since is_shadow changes can the type of the original var, we need to
-    * remove the old derefs */
-   nir_deref_instr_remove_if_unused(final_deref);
    return true;
 }
 
@@ -1850,4 +1840,61 @@ dxil_reassign_driver_locations(nir_shader* s, nir_variable_mode modes,
          driver_patch_loc++ : driver_loc++;
    }
    return result;
+}
+
+static bool
+lower_ubo_array_one_to_static(struct nir_builder *b, nir_instr *inst,
+                              void *cb_data)
+{
+   if (inst->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(inst);
+
+   if (intrin->intrinsic != nir_intrinsic_load_vulkan_descriptor)
+      return false;
+
+   nir_variable *var =
+      nir_get_binding_variable(b->shader, nir_chase_binding(intrin->src[0]));
+
+   if (!var)
+      return false;
+
+   if (!glsl_type_is_array(var->type) || glsl_array_size(var->type) != 1)
+      return false;
+
+   nir_intrinsic_instr *index = nir_src_as_intrinsic(intrin->src[0]);
+   /* We currently do not support reindex */
+   assert(index && index->intrinsic == nir_intrinsic_vulkan_resource_index);
+
+   if (nir_src_is_const(index->src[0]) && nir_src_as_uint(index->src[0]) == 0)
+      return false;
+
+   if (nir_intrinsic_desc_type(index) != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+      return false;
+
+   b->cursor = nir_instr_remove(&index->instr);
+
+   // Indexing out of bounds on array of UBOs is considered undefined
+   // behavior. Therefore, we just hardcode all the index to 0.
+   uint8_t bit_size = index->dest.ssa.bit_size;
+   nir_ssa_def *zero = nir_imm_intN_t(b, 0, bit_size);
+   nir_ssa_def *dest =
+      nir_vulkan_resource_index(b, index->num_components, bit_size, zero,
+                                .desc_set = nir_intrinsic_desc_set(index),
+                                .binding = nir_intrinsic_binding(index),
+                                .desc_type = nir_intrinsic_desc_type(index));
+
+   nir_ssa_def_rewrite_uses(&index->dest.ssa, dest);
+
+   return true;
+}
+
+bool
+dxil_nir_lower_ubo_array_one_to_static(nir_shader *s)
+{
+   bool progress = nir_shader_instructions_pass(
+      s, lower_ubo_array_one_to_static, nir_metadata_none, NULL);
+
+   return progress;
 }

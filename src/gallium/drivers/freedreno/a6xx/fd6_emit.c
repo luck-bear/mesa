@@ -586,7 +586,7 @@ compute_ztest_mode(struct fd6_emit *emit, bool lrz_valid) assert_dt
    struct fd6_zsa_stateobj *zsa = fd6_zsa_stateobj(ctx->zsa);
    const struct ir3_shader_variant *fs = emit->fs;
 
-   if (fs->shader->nir->info.fs.early_fragment_tests)
+   if (fs->fs.early_fragment_tests)
       return A6XX_EARLY_Z;
 
    if (fs->no_earlyz || fs->writes_pos || !zsa->base.depth_enabled ||
@@ -856,7 +856,7 @@ fd6_emit_streamout(struct fd_ringbuffer *ring, struct fd6_emit *emit) assert_dt
 {
    struct fd_context *ctx = emit->ctx;
    const struct fd6_program_state *prog = fd6_emit_get_prog(emit);
-   struct ir3_stream_output_info *info = prog->stream_output;
+   const struct ir3_stream_output_info *info = prog->stream_output;
    struct fd_streamout_stateobj *so = &ctx->streamout;
 
    emit->streamout_mask = 0;

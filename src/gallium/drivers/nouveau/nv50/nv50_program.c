@@ -71,6 +71,9 @@ nv50_vertprog_assign_slots(struct nv50_ir_prog_info_out *info)
          prog->vp.attrs[2] |= NV50_3D_VP_GP_BUILTIN_ATTR_EN_VERTEX_ID;
          prog->vp.attrs[2] |= NV50_3D_VP_GP_BUILTIN_ATTR_EN_VERTEX_ID_DRAW_ARRAYS_ADD_START;
          continue;
+      case TGSI_SEMANTIC_PRIMID:
+         prog->vp.attrs[2] |= NV50_3D_VP_GP_BUILTIN_ATTR_EN_PRIMITIVE_ID;
+         break;
       default:
          break;
       }
@@ -453,9 +456,9 @@ nv50_program_translate(struct nv50_program *prog, uint16_t chipset,
                                                    &prog->pipe.stream_output);
 
    util_debug_message(debug, SHADER_INFO,
-                      "type: %d, local: %d, shared: %d, gpr: %d, inst: %d, bytes: %d",
+                      "type: %d, local: %d, shared: %d, gpr: %d, inst: %d, loops: %d, bytes: %d",
                       prog->type, info_out.bin.tlsSpace, info_out.bin.smemSize,
-                      prog->max_gpr, info_out.bin.instructions,
+                      prog->max_gpr, info_out.bin.instructions, info_out.loops,
                       info_out.bin.codeSize);
 
 out:

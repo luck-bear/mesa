@@ -127,6 +127,14 @@ enum
    SI_NUM_SW_QUERY_GROUPS
 };
 
+/* The counters are stored in a buffer, each with a start and end value,
+ * with this layout:
+ * [start1][start2][...][startN][end1][end2][...][endN]
+ * N is 11 and each value is a 64-bit int so we get:
+ */
+#define SI_QUERY_STATS_END_OFFSET_DW (11 * 2)
+int si_hw_query_dw_offset(int index);
+
 struct si_query_ops {
    void (*destroy)(struct si_context *, struct si_query *);
    bool (*begin)(struct si_context *, struct si_query *);
@@ -162,6 +170,10 @@ enum
    /* gap */
    /* whether begin_query doesn't clear the result */
    SI_QUERY_HW_FLAG_BEGIN_RESUMES = (1 << 2),
+   /* whether GS invocations and emitted primitives counters are emulated
+    * using atomic adds.
+    */
+   SI_QUERY_EMULATE_GS_COUNTERS = (1 << 3),
 };
 
 struct si_query_hw_ops {
@@ -203,8 +215,12 @@ struct si_query_hw {
    /* Size of the result in memory for both begin_query and end_query,
     * this can be one or two numbers, or it could even be a size of a structure. */
    unsigned result_size;
-   /* For transform feedback: which stream the query is for */
-   unsigned stream;
+   union {
+      /* For transform feedback: which stream the query is for */
+      unsigned stream;
+      /* For pipeline stats: which counter is active */
+      unsigned index;
+   };
 
    /* Workaround via compute shader */
    struct si_resource *workaround_buf;

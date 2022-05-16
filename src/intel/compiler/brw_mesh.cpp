@@ -361,6 +361,8 @@ brw_compute_mue_map(struct nir_shader *nir, struct brw_mue_map *map)
    /* TODO(mesh): Multiview. */
    map->per_primitive_header_size_dw =
          (nir->info.outputs_written & (BITFIELD64_BIT(VARYING_SLOT_VIEWPORT) |
+                                       BITFIELD64_BIT(VARYING_SLOT_CULL_PRIMITIVE) |
+                                       BITFIELD64_BIT(VARYING_SLOT_PRIMITIVE_SHADING_RATE) |
                                        BITFIELD64_BIT(VARYING_SLOT_LAYER))) ? 8 : 0;
 
    map->per_primitive_start_dw = ALIGN(primitive_list_size_dw, 8);
@@ -371,11 +373,17 @@ brw_compute_mue_map(struct nir_shader *nir, struct brw_mue_map *map)
 
       unsigned start;
       switch (location) {
+      case VARYING_SLOT_PRIMITIVE_SHADING_RATE:
+         start = map->per_primitive_start_dw + 0;
+         break;
       case VARYING_SLOT_LAYER:
          start = map->per_primitive_start_dw + 1; /* RTAIndex */
          break;
       case VARYING_SLOT_VIEWPORT:
          start = map->per_primitive_start_dw + 2;
+         break;
+      case VARYING_SLOT_CULL_PRIMITIVE:
+         start = map->per_primitive_start_dw + 3;
          break;
       default:
          assert(location == VARYING_SLOT_PRIMITIVE_ID ||
@@ -504,6 +512,8 @@ brw_nir_lower_mue_outputs(nir_shader *nir, const struct brw_mue_map *map)
 
    nir_lower_io(nir, nir_var_shader_out, type_size_scalar_dwords,
                 nir_lower_io_lower_64bit_to_32);
+
+   brw_nir_lower_shading_rate_output(nir);
 }
 
 static void
@@ -583,6 +593,13 @@ brw_nir_initialize_mue(nir_shader *nir,
    if (workgroup_size > dispatch_width) {
       nir_scoped_barrier(&b, NIR_SCOPE_WORKGROUP, NIR_SCOPE_WORKGROUP,
                          NIR_MEMORY_ACQ_REL, nir_var_shader_out);
+   }
+
+   if (remaining) {
+      nir_metadata_preserve(entrypoint, nir_metadata_none);
+   } else {
+      nir_metadata_preserve(entrypoint, nir_metadata_block_index |
+                                        nir_metadata_dominance);
    }
 }
 

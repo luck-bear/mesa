@@ -254,15 +254,6 @@ glsl_to_nir(const struct gl_constants *consts,
    if (shader_prog->Label)
       shader->info.label = ralloc_strdup(shader, shader_prog->Label);
 
-   /* Check for transform feedback varyings specified via the API */
-   shader->info.has_transform_feedback_varyings =
-      shader_prog->TransformFeedback.NumVarying > 0;
-
-   /* Check for transform feedback varyings specified in the Shader */
-   if (shader_prog->last_vert_prog)
-      shader->info.has_transform_feedback_varyings |=
-         shader_prog->last_vert_prog->sh.LinkedTransformFeedback->NumVarying > 0;
-
    if (shader->info.stage == MESA_SHADER_FRAGMENT) {
       shader->info.fs.pixel_center_integer = sh->Program->info.fs.pixel_center_integer;
       shader->info.fs.origin_upper_left = sh->Program->info.fs.origin_upper_left;
@@ -496,6 +487,7 @@ nir_visitor::visit(ir_variable *ir)
    var->type = ir->type;
    var->name = ralloc_strdup(var, ir->name);
 
+   var->data.assigned = ir->data.assigned;
    var->data.always_active_io = ir->data.always_active_io;
    var->data.read_only = ir->data.read_only;
    var->data.centroid = ir->data.centroid;
@@ -504,6 +496,7 @@ nir_visitor::visit(ir_variable *ir)
    var->data.how_declared = get_nir_how_declared(ir->data.how_declared);
    var->data.invariant = ir->data.invariant;
    var->data.location = ir->data.location;
+   var->data.must_be_shader_input = ir->data.must_be_shader_input;
    var->data.stream = ir->data.stream;
    if (ir->data.stream & (1u << 31))
       var->data.stream |= NIR_STREAM_PACKED;
@@ -668,6 +661,7 @@ nir_visitor::visit(ir_variable *ir)
    var->data.descriptor_set = 0;
    var->data.binding = ir->data.binding;
    var->data.explicit_binding = ir->data.explicit_binding;
+   var->data.explicit_offset = ir->data.explicit_xfb_offset;
    var->data.bindless = ir->data.bindless;
    var->data.offset = ir->data.offset;
    var->data.access = (gl_access_qualifier)mem_access;
@@ -2335,15 +2329,9 @@ nir_visitor::visit(ir_expression *ir)
    case ir_binop_dot:
       result = nir_fdot(&b, srcs[0], srcs[1]);
       break;
-   case ir_binop_vector_extract: {
-      result = nir_channel(&b, srcs[0], 0);
-      for (unsigned i = 1; i < ir->operands[0]->type->vector_elements; i++) {
-         nir_ssa_def *swizzled = nir_channel(&b, srcs[0], i);
-         result = nir_bcsel(&b, nir_ieq_imm(&b, srcs[1], i),
-                            swizzled, result);
-      }
+   case ir_binop_vector_extract:
+      result = nir_vector_extract(&b, srcs[0], srcs[1]);
       break;
-   }
 
    case ir_binop_atan2:
       result = nir_atan2(&b, srcs[0], srcs[1]);
@@ -2478,12 +2466,12 @@ nir_visitor::visit(ir_texture *ir)
       (glsl_sampler_dim) ir->sampler->type->sampler_dimensionality;
    instr->is_array = ir->sampler->type->sampler_array;
    instr->is_shadow = ir->sampler->type->sampler_shadow;
-   if (instr->is_shadow)
-      instr->is_new_style_shadow = (ir->type->vector_elements == 1);
 
    const glsl_type *dest_type
       = ir->is_sparse ? ir->type->field_type("texel") : ir->type;
    assert(dest_type != glsl_type::error_type);
+   if (instr->is_shadow)
+      instr->is_new_style_shadow = (dest_type->vector_elements == 1);
    instr->dest_type = nir_get_nir_type_for_glsl_type(dest_type);
    instr->is_sparse = ir->is_sparse;
 
@@ -2536,7 +2524,6 @@ nir_visitor::visit(ir_texture *ir)
 
             for (unsigned j = 0; j < 2; ++j) {
                int val = c->get_int_component(j);
-               assert(val <= 31 && val >= -32);
                instr->tg4_offsets[i][j] = val;
             }
          }

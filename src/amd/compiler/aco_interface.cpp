@@ -105,7 +105,7 @@ get_disasm_string(aco::Program* program, std::vector<uint32_t>& code,
 
 void
 aco_compile_shader(const struct radv_nir_compiler_options* options,
-                   const struct radv_shader_info* info,
+                   const struct aco_shader_info* info,
                    unsigned shader_count, struct nir_shader* const* shaders,
                    const struct radv_shader_args *args,
                    struct radv_shader_binary** binary)
@@ -212,7 +212,7 @@ aco_compile_shader(const struct radv_nir_compiler_options* options,
    aco::insert_wait_states(program.get());
    aco::insert_NOPs(program.get());
 
-   if (program->chip_class >= GFX10)
+   if (program->gfx_level >= GFX10)
       aco::form_hard_clauses(program.get());
 
    if (program->collect_statistics || (aco::debug_flags & aco::DEBUG_PERF_INFO))
@@ -280,8 +280,8 @@ aco_compile_shader(const struct radv_nir_compiler_options* options,
 
 void
 aco_compile_vs_prolog(const struct radv_nir_compiler_options* options,
-                      const struct radv_shader_info* info,
-                      const struct radv_vs_prolog_key* key,
+                      const struct aco_shader_info* info,
+                      const struct aco_vs_prolog_key* key,
                       const struct radv_shader_args* args,
                       struct radv_prolog_binary** binary)
 {

@@ -67,7 +67,6 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
-#include "tgsi/tgsi_ureg.h"
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_math.h"
@@ -630,7 +629,7 @@ make_texture(struct st_context *st,
     * image to draw.
     */
    pipeFormat = st_choose_matching_format(st, PIPE_BIND_SAMPLER_VIEW,
-                                          format, type, unpack->SwapBytes);
+                                          format, type, 0, 0, unpack->SwapBytes);
 
    if (pipeFormat == PIPE_FORMAT_NONE) {
       /* Use the generic approach. */

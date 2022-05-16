@@ -1,10 +1,20 @@
+# #6115
+spec@arb_tessellation_shader@execution@variable-indexing@tes-both-input-array-float-index-rd,Crash
+spec@arb_tessellation_shader@execution@variable-indexing@tes-both-input-array-vec2-index-rd,Crash
+spec@arb_tessellation_shader@execution@variable-indexing@tes-both-input-array-vec3-index-rd,Crash
+spec@arb_tessellation_shader@execution@variable-indexing@tes-both-input-array-vec4-index-rd,Crash
+
+# #6322
+spec@arb_framebuffer_object@fbo-attachments-blit-scaled-linear,Fail
+spec@arb_framebuffer_object@fbo-blit-scaled-linear,Fail
+
+
 # #6270
 spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgradcube,Fail
 
 #kopper regressions/changes
 fast_color_clear@fcc-front-buffer-distraction,Fail
 glx@extension string sanity,Fail
-glx@glx-tfp,Fail
 spec@!opengl 1.0@gl-1.0-drawbuffer-modes,Fail
 spec@!opengl 1.0@gl-1.0-front-invalidate-back,Fail
 spec@egl_chromium_sync_control@conformance,Fail
@@ -117,7 +127,9 @@ glx@glx-visuals-depth -pixmap,Crash
 glx@glx-visuals-stencil,Crash
 glx@glx-visuals-stencil -pixmap,Crash
 glx@glx_arb_create_context_es2_profile@invalid opengl es version,Fail
-glx@glx_arb_create_context_no_error@no error,Fail
+# X error 167 (GLXBadFBConfig (9)) was generated, but X error 8 was expected.
+glx@glx_arb_create_context_no_error@no error,Crash
+
 glx@glx_ext_import_context@free context,Fail
 glx@glx_ext_import_context@get context id,Fail
 glx@glx_ext_import_context@get current display,Fail
@@ -293,7 +305,6 @@ spec@ext_texture_snorm@fbo-blending-formats@GL_LUMINANCE16_SNORM,Fail
 spec@ext_texture_snorm@fbo-blending-formats@GL_LUMINANCE8_SNORM,Fail
 spec@ext_texture_snorm@fbo-blending-formats@GL_LUMINANCE_SNORM,Fail
 spec@ext_texture_swizzle@depth_texture_mode_and_swizzle,Fail
-spec@ext_transform_feedback@generatemipmap prims_generated,Fail
 spec@intel_performance_query@intel_performance_query-issue_2235,Fail
 spec@khr_texture_compression_astc@array-gl,Fail
 spec@khr_texture_compression_astc@array-gl@12x12 Block Dim,Fail
@@ -333,9 +344,6 @@ spec@arb_shader_image_load_store@early-z@occlusion query test/early-z pass,Fail
 
 spec@arb_shader_image_load_store@execution@image-array-out-of-bounds-access-load,Crash
 spec@arb_shader_image_load_store@execution@image-array-out-of-bounds-access-store,Crash
-
-spec@arb_shader_image_load_store@invalid,Fail
-spec@arb_shader_image_load_store@invalid@imageLoad/incompatible format test/imageBuffer,Fail
 
 spec@arb_tessellation_shader@execution@tcs-tes-levels-out-of-bounds-read,Crash
 spec@arb_tessellation_shader@execution@tcs-tes-levels-out-of-bounds-write,Crash
@@ -414,7 +422,6 @@ spec@arb_shader_texture_lod@execution@glsl-fs-shadow2dgradarb-03,Fail
 spec@arb_shader_texture_lod@execution@glsl-fs-shadow2dgradarb-07,Fail
 spec@arb_shader_texture_lod@execution@glsl-fs-shadow2dgradarb-08,Fail
 spec@arb_shader_texture_lod@execution@glsl-fs-shadow2dgradarb-cumulative,Fail
-spec@arb_tessellation_shader@execution@fs-primitiveid-instanced,Crash
 spec@arb_tessellation_shader@execution@gs-primitiveid-instanced,Fail
 spec@arb_texture_rectangle@glsl-fs-shadow2drect,Fail
 spec@arb_texture_rectangle@glsl-fs-shadow2drect-01,Fail

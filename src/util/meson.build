@@ -102,7 +102,6 @@ files_mesa_util = files(
   'rounding.h',
   'set.c',
   'set.h',
-  'simple_list.h',
   'simple_mtx.h',
   'slab.c',
   'slab.h',
@@ -144,8 +143,10 @@ files_mesa_util = files(
   'u_debug_memory.c',
   'u_cpu_detect.c',
   'u_cpu_detect.h',
-  'u_printf.cpp',
+  'u_printf.c',
   'u_printf.h',
+  'u_worklist.c',
+  'u_worklist.h',
   'vl_vlc.h',
   'vl_rbsp.h',
   'vma.c',
@@ -323,6 +324,7 @@ if with_tests
     'tests/dag_test.cpp',
     'tests/fast_idiv_by_const_test.cpp',
     'tests/fast_urem_by_const_test.cpp',
+    'tests/half_float_test.cpp',
     'tests/int_min_max.cpp',
     'tests/rb_tree_test.cpp',
     'tests/register_allocate_test.cpp',
@@ -331,6 +333,7 @@ if with_tests
     'tests/sparse_array_test.cpp',
     'tests/u_atomic_test.cpp',
     'tests/u_debug_stack_test.cpp',
+    'tests/u_printf_test.cpp',
     'tests/u_qsort_test.cpp',
     'tests/vector_test.cpp',
   )
@@ -387,7 +390,8 @@ if with_tests
     # https://gitlab.freedesktop.org/mesa/mesa/-/issues/2788
     prog_winepath = find_program('winepath')
     process_test_exe_full_path = run_command(
-      prog_winepath, '-w', process_test_exe.full_path()
+      prog_winepath, '-w', process_test_exe.full_path(),
+      check : true
     ).stdout().strip()
   else
     process_test_exe_full_path = process_test_exe.full_path()

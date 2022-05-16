@@ -159,8 +159,9 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
       cs->PE_COLOR_FORMAT |=
          VIVS_PE_COLOR_FORMAT_COMPONENTS__MASK |
          VIVS_PE_COLOR_FORMAT_OVERWRITE |
-         COND(color_supertiled, VIVS_PE_COLOR_FORMAT_SUPER_TILED) |
-         COND(color_supertiled && screen->specs.halti >= 5, VIVS_PE_COLOR_FORMAT_SUPER_TILED_NEW);
+         COND(color_supertiled, VIVS_PE_COLOR_FORMAT_SUPER_TILED);
+      if (VIV_FEATURE(screen, chipMinorFeatures6, CACHE128B256BPERLINE))
+         cs->PE_COLOR_FORMAT |= COND(color_supertiled, VIVS_PE_COLOR_FORMAT_SUPER_TILED_NEW);
       /* VIVS_PE_COLOR_FORMAT_COMPONENTS() and
        * VIVS_PE_COLOR_FORMAT_OVERWRITE comes from blend_state
        * but only if we set the bits above. */
@@ -176,17 +177,20 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
              cbuf->surf.offset, cbuf->surf.stride * 4);
       }
 
-      if (screen->specs.pixel_pipes == 1) {
-         cs->PE_COLOR_ADDR = cbuf->reloc[0];
-         cs->PE_COLOR_ADDR.flags = ETNA_RELOC_READ | ETNA_RELOC_WRITE;
-      } else {
-         /* Rendered textures must always be multi-tiled, or single-buffer mode must be supported */
-         assert((res->layout & ETNA_LAYOUT_BIT_MULTI) || screen->specs.single_buffer);
+      if (screen->specs.halti >= 0) {
+         /* Rendertargets on GPUs with more than a single pixel pipe must always
+          * be multi-tiled, or single-buffer mode must be supported */
+         assert(screen->specs.pixel_pipes == 1 ||
+                (res->layout & ETNA_LAYOUT_BIT_MULTI) || screen->specs.single_buffer);
          for (int i = 0; i < screen->specs.pixel_pipes; i++) {
             cs->PE_PIPE_COLOR_ADDR[i] = cbuf->reloc[i];
             cs->PE_PIPE_COLOR_ADDR[i].flags = ETNA_RELOC_READ | ETNA_RELOC_WRITE;
          }
+      } else {
+         cs->PE_COLOR_ADDR = cbuf->reloc[0];
+         cs->PE_COLOR_ADDR.flags = ETNA_RELOC_READ | ETNA_RELOC_WRITE;
       }
+
       cs->PE_COLOR_STRIDE = cbuf->surf.stride;
 
       if (cbuf->surf.ts_size) {
@@ -255,14 +259,14 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
       /* VIVS_PE_DEPTH_CONFIG_ONLY_DEPTH */
       /* merged with depth_stencil_alpha */
 
-      if (screen->specs.pixel_pipes == 1) {
-         cs->PE_DEPTH_ADDR = zsbuf->reloc[0];
-         cs->PE_DEPTH_ADDR.flags = ETNA_RELOC_READ | ETNA_RELOC_WRITE;
-      } else {
+      if (screen->specs.halti >= 0) {
          for (int i = 0; i < screen->specs.pixel_pipes; i++) {
             cs->PE_PIPE_DEPTH_ADDR[i] = zsbuf->reloc[i];
             cs->PE_PIPE_DEPTH_ADDR[i].flags = ETNA_RELOC_READ | ETNA_RELOC_WRITE;
          }
+      } else {
+         cs->PE_DEPTH_ADDR = zsbuf->reloc[0];
+         cs->PE_DEPTH_ADDR.flags = ETNA_RELOC_READ | ETNA_RELOC_WRITE;
       }
 
       cs->PE_DEPTH_STRIDE = zsbuf->surf.stride;

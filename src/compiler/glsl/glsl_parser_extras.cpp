@@ -2109,18 +2109,12 @@ opt_shader_and_create_symbol_table(const struct gl_constants *consts,
       &consts->ShaderCompilerOptions[shader->Stage];
 
    /* Do some optimization at compile time to reduce shader IR size
-    * and reduce later work if the same shader is linked multiple times
+    * and reduce later work if the same shader is linked multiple times.
+    *
+    * Run it just once, since NIR will do the real optimization.
     */
-   if (consts->GLSLOptimizeConservatively) {
-      /* Run it just once. */
-      do_common_optimization(shader->ir, false, false, options,
-                             consts->NativeIntegers);
-   } else {
-      /* Repeat it until it stops making changes. */
-      while (do_common_optimization(shader->ir, false, false, options,
-                                    consts->NativeIntegers))
-         ;
-   }
+   do_common_optimization(shader->ir, false, false, options,
+                           consts->NativeIntegers);
 
    validate_ir_tree(shader->ir);
 
@@ -2420,7 +2414,7 @@ do_common_optimization(exec_list *ir, bool linked,
    OPT(do_rebalance_tree, ir);
    OPT(do_algebraic, ir, native_integers, options);
    OPT(do_lower_jumps, ir, true, true, options->EmitNoMainReturn,
-       options->EmitNoCont, options->EmitNoLoops);
+       options->EmitNoCont);
    OPT(do_vec_index_to_swizzle, ir);
    OPT(lower_vector_insert, ir, false);
    OPT(optimize_swizzles, ir);
@@ -2463,20 +2457,15 @@ do_common_optimization(exec_list *ir, bool linked,
              */
             loop_progress |= do_lower_jumps(ir, true, true,
                                             options->EmitNoMainReturn,
-                                            options->EmitNoCont,
-                                            options->EmitNoLoops);
+                                            options->EmitNoCont);
          }
          progress |= loop_progress;
       }
       delete ls;
    }
 
-   /* If the PIPE_CAP_GLSL_OPTIMIZE_CONSERVATIVELY cap is set, this pass will
-    * only be called once rather than repeatedly until no further progress is
-    * made.
-    *
-    * If an optimization pass fails to preserve the invariant flag, calling
-    * the pass only once may result in incorrect code generation. Always call
+   /* If an optimization pass fails to preserve the invariant flag, calling
+    * the pass only once earlier may result in incorrect code generation. Always call
     * propagate_invariance() last to avoid this possibility.
     */
    OPT(propagate_invariance, ir);

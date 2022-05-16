@@ -65,6 +65,7 @@
 #include "vk_log.h"
 #include "vk_physical_device.h"
 #include "vk_shader_module.h"
+#include "vk_pipeline_cache.h"
 #include "wsi_common.h"
 
 #include "ir3/ir3_compiler.h"
@@ -239,11 +240,6 @@ struct tu_physical_device
    /* Address space and global fault count for this local_fd with DRM backend */
    uint64_t fault_count;
 
-   /* This is the drivers on-disk cache used as a fallback as opposed to
-    * the pipeline cache defined by apps.
-    */
-   struct disk_cache *disk_cache;
-
    struct tu_memory_heap heap;
 
    struct vk_sync_type syncobj_type;
@@ -268,6 +264,9 @@ enum tu_debug_flags
    TU_DEBUG_GMEM = 1 << 13,
    TU_DEBUG_RAST_ORDER = 1 << 14,
    TU_DEBUG_UNALIGNED_STORE = 1 << 15,
+   TU_DEBUG_LAYOUT = 1 << 16,
+   TU_DEBUG_LOG_SKIP_GMEM_OPS = 1 << 17,
+   TU_DEBUG_PERF = 1 << 18,
 };
 
 struct tu_instance
@@ -296,6 +295,13 @@ tu_physical_device_api_version(struct tu_physical_device *dev);
 bool
 tu_physical_device_extension_supported(struct tu_physical_device *dev,
                                        const char *name);
+
+enum tu_bo_alloc_flags
+{
+   TU_BO_ALLOC_NO_FLAGS = 0,
+   TU_BO_ALLOC_ALLOW_DUMP = 1 << 0,
+   TU_BO_ALLOC_GPU_READ_ONLY = 1 << 1,
+};
 
 struct cache_entry;
 
@@ -370,14 +376,55 @@ struct tu_bo
    uint64_t size;
    uint64_t iova;
    void *map;
+   int32_t refcnt;
 
 #ifndef TU_USE_KGSL
-   int32_t refcnt;
    uint32_t bo_list_idx;
 #endif
 
    bool implicit_sync : 1;
 };
+
+/* externally-synchronized BO suballocator. */
+struct tu_suballocator
+{
+   struct tu_device *dev;
+
+   uint32_t default_size;
+   enum tu_bo_alloc_flags flags;
+
+   /** Current BO we're suballocating out of. */
+   struct tu_bo *bo;
+   uint32_t next_offset;
+
+   /** Optional BO cached for recycling as the next suballoc->bo, instead of having to allocate one. */
+   struct tu_bo *cached_bo;
+};
+
+struct tu_suballoc_bo
+{
+   struct tu_bo *bo;
+   uint64_t iova;
+   uint32_t size; /* bytes */
+};
+
+void
+tu_bo_suballocator_init(struct tu_suballocator *suballoc,
+                        struct tu_device *dev,
+                        uint32_t default_size,
+                        uint32_t flags);
+void
+tu_bo_suballocator_finish(struct tu_suballocator *suballoc);
+
+VkResult
+tu_suballoc_bo_alloc(struct tu_suballoc_bo *suballoc_bo, struct tu_suballocator *suballoc,
+                     uint32_t size, uint32_t align);
+
+void *
+tu_suballoc_bo_map(struct tu_suballoc_bo *bo);
+
+void
+tu_suballoc_bo_free(struct tu_suballocator *suballoc, struct tu_suballoc_bo *bo);
 
 enum global_shader {
    GLOBAL_SH_VS_BLIT,
@@ -388,6 +435,27 @@ enum global_shader {
    GLOBAL_SH_FS_CLEAR0,
    GLOBAL_SH_FS_CLEAR_MAX = GLOBAL_SH_FS_CLEAR0 + MAX_RTS,
    GLOBAL_SH_COUNT,
+};
+
+/**
+ * Tracks the results from an individual renderpass. Initially created
+ * per renderpass, and appended to the tail of at->pending_results. At a later
+ * time, when the GPU has finished writing the results, we fill samples_passed.
+ */
+struct tu_renderpass_result {
+   /* Points into GPU memory */
+   struct tu_renderpass_samples* samples;
+
+   struct tu_suballoc_bo bo;
+
+   /*
+    * Below here, only used internally within autotune
+    */
+   uint64_t rp_key;
+   struct tu_renderpass_history *history;
+   struct list_head node;
+   uint32_t fence;
+   uint64_t samples_passed;
 };
 
 #define TU_BORDER_COLOR_COUNT 4096
@@ -420,6 +488,12 @@ struct tu6_global
    /* To know when renderpass stats for autotune are valid */
    volatile uint32_t autotune_fence;
 
+   volatile uint32_t dbg_one;
+   volatile uint32_t dbg_gmem_total_loads;
+   volatile uint32_t dbg_gmem_taken_loads;
+   volatile uint32_t dbg_gmem_total_stores;
+   volatile uint32_t dbg_gmem_taken_stores;
+
    /* note: larger global bo will be used for customBorderColors */
    struct bcolor_entry bcolor_builtin[TU_BORDER_COLOR_BUILTIN], bcolor[];
 };
@@ -443,7 +517,7 @@ struct tu_device
    struct ir3_compiler *compiler;
 
    /* Backup in-memory cache to be used if the app doesn't provide one */
-   struct tu_pipeline_cache *mem_cache;
+   struct vk_pipeline_cache *mem_cache;
 
 #define MIN_SCRATCH_BO_SIZE_LOG2 12 /* A page */
 
@@ -460,6 +534,18 @@ struct tu_device
 
    uint32_t implicit_sync_bo_count;
 
+   /* Device-global BO suballocator for reducing BO management overhead for
+    * (read-only) pipeline state.  Synchronized by pipeline_mutex.
+    */
+   struct tu_suballocator pipeline_suballoc;
+   mtx_t pipeline_mutex;
+
+   /* Device-global BO suballocator for reducing BO management for small
+    * gmem/sysmem autotune result buffers.  Synchronized by autotune_mutex.
+    */
+   struct tu_suballocator autotune_suballoc;
+   mtx_t autotune_mutex;
+
    /* the blob seems to always use 8K factor and 128K param sizes, copy them */
 #define TU_TESS_FACTOR_SIZE (8 * 1024)
 #define TU_TESS_PARAM_SIZE (128 * 1024)
@@ -467,7 +553,8 @@ struct tu_device
    /* Lazily allocated, protected by the device mutex. */
    struct tu_bo *tess_bo;
 
-   struct ir3_shader_variant *global_shaders[GLOBAL_SH_COUNT];
+   struct ir3_shader_variant *global_shader_variants[GLOBAL_SH_COUNT];
+   struct ir3_shader *global_shaders[GLOBAL_SH_COUNT];
    uint64_t global_shader_va[GLOBAL_SH_COUNT];
 
    uint32_t vsc_draw_strm_pitch;
@@ -495,8 +582,9 @@ struct tu_device
     * freed. Otherwise, if we are not self-importing, we get two different BO
     * handles, and we want to free each one individually.
     *
-    * The BOs in this map all have a refcnt with the reference counter and
-    * only self-imported BOs will ever have a refcnt > 1.
+    * The refcount is also useful for being able to maintain BOs across
+    * VK object lifetimes, such as pipelines suballocating out of BOs
+    * allocated on the device.
     */
    struct util_sparse_array bo_map;
 
@@ -545,13 +633,6 @@ tu_device_ticks_to_ns(struct tu_device *dev, uint64_t ts);
 VkResult
 tu_device_check_status(struct vk_device *vk_device);
 
-enum tu_bo_alloc_flags
-{
-   TU_BO_ALLOC_NO_FLAGS = 0,
-   TU_BO_ALLOC_ALLOW_DUMP = 1 << 0,
-   TU_BO_ALLOC_GPU_READ_ONLY = 1 << 1,
-};
-
 VkResult
 tu_bo_init_new(struct tu_device *dev, struct tu_bo **bo, uint64_t size,
                enum tu_bo_alloc_flags flags);
@@ -571,6 +652,13 @@ static inline struct tu_bo *
 tu_device_lookup_bo(struct tu_device *device, uint32_t handle)
 {
    return (struct tu_bo *) util_sparse_array_get(&device->bo_map, handle);
+}
+
+static inline struct tu_bo *
+tu_bo_get_ref(struct tu_bo *bo)
+{
+   p_atomic_inc(&bo->refcnt);
+   return bo;
 }
 
 /* Get a scratch bo for use inside a command buffer. This will always return
@@ -694,6 +782,9 @@ struct tu_cs
    struct tu_bo **bos;
    uint32_t bo_count;
    uint32_t bo_capacity;
+
+   /* Optional BO that this CS is sub-allocated from for TU_CS_MODE_SUB_STREAM */
+   struct tu_bo *refcount_bo;
 
    /* state for cond_exec_start/cond_exec_end */
    uint32_t cond_flags;
@@ -1032,7 +1123,10 @@ struct tu_lrz_state
 {
    /* Depth/Stencil image currently on use to do LRZ */
    struct tu_image *image;
+   /* If LRZ is in invalid state we cannot use it until depth is cleared */
    bool valid : 1;
+   /* Allows to temporary disable LRZ */
+   bool enabled : 1;
    enum tu_lrz_direction prev_direction;
 };
 
@@ -1107,6 +1201,10 @@ struct tu_cmd_state
    VkRect2D render_area;
 
    const struct tu_image_view **attachments;
+   /* Tracks whether attachment was cleared by vkCmdClearAttachments */
+   bool *attachment_cmd_clear;
+   /* Track whether conditional predicate for COND_REG_EXEC is changed in draw_cs */
+   bool draw_cs_writes_to_cond_pred;
 
    bool xfb_used;
    bool has_tess;
@@ -1201,6 +1299,7 @@ struct tu_cmd_buffer
    VkResult record_result;
 
    struct tu_cs cs;
+   struct tu_cs tile_load_cs;
    struct tu_cs draw_cs;
    struct tu_cs tile_store_cs;
    struct tu_cs draw_epilogue_cs;
@@ -1264,6 +1363,24 @@ struct tu_shader
    bool multi_pos_output;
 };
 
+struct tu_shader_key {
+   unsigned multiview_mask;
+   enum ir3_wavesize_option api_wavesize, real_wavesize;
+};
+
+struct tu_compiled_shaders
+{
+   struct vk_pipeline_cache_object base;
+
+   struct tu_push_constant_range push_consts[MESA_SHADER_STAGES];
+   uint8_t active_desc_sets;
+   bool multi_pos_output;
+
+   struct ir3_shader_variant *variants[MESA_SHADER_STAGES];
+};
+
+extern const struct vk_pipeline_cache_object_ops tu_shaders_ops;
+
 bool
 tu_nir_lower_multiview(nir_shader *nir, uint32_t mask, bool *multi_pos_output,
                        struct tu_device *dev);
@@ -1277,8 +1394,7 @@ tu_spirv_to_nir(struct tu_device *dev,
 struct tu_shader *
 tu_shader_create(struct tu_device *dev,
                  nir_shader *nir,
-                 const VkPipelineShaderStageCreateInfo *stage_info,
-                 unsigned multiview_mask,
+                 const struct tu_shader_key *key,
                  struct tu_pipeline_layout *layout,
                  const VkAllocationCallbacks *alloc);
 
@@ -1312,6 +1428,7 @@ struct tu_pipeline
    struct vk_object_base base;
 
    struct tu_cs cs;
+   struct tu_suballoc_bo bo;
 
    /* Separate BO for private memory since it should GPU writable */
    struct tu_bo *pvtmem_bo;
@@ -1486,6 +1603,7 @@ void
 tu_load_gmem_attachment(struct tu_cmd_buffer *cmd,
                         struct tu_cs *cs,
                         uint32_t a,
+                        bool cond_exec_allowed,
                         bool force_load);
 
 /* expose this function to be able to emit load without checking LOAD_OP */
@@ -1497,7 +1615,8 @@ void
 tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
                          struct tu_cs *cs,
                          uint32_t a,
-                         uint32_t gmem_a);
+                         uint32_t gmem_a,
+                         bool cond_exec_allowed);
 
 enum pipe_format tu_vk_format_to_pipe_format(VkFormat vk_format);
 
@@ -1571,6 +1690,7 @@ tu_get_levelCount(const struct tu_image *image,
              : range->levelCount;
 }
 
+uint32_t tu6_plane_count(VkFormat format);
 enum pipe_format tu6_plane_format(VkFormat format, uint32_t plane);
 
 uint32_t tu6_plane_index(VkFormat format, VkImageAspectFlags aspect_mask);
@@ -1767,6 +1887,7 @@ struct tu_render_pass_attachment
    bool load;
    bool store;
    int32_t gmem_offset;
+   bool will_be_resolved;
    /* for D32S8 separate stencil: */
    bool load_stencil;
    bool store_stencil;

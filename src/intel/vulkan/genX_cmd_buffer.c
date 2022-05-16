@@ -683,7 +683,7 @@ vk_image_layout_stencil_write_optimal(VkImageLayout layout)
 {
    return layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
           layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL ||
-          layout == VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL_KHR;
+          layout == VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
 }
 #endif
 
@@ -713,7 +713,7 @@ transition_stencil_buffer(struct anv_cmd_buffer *cmd_buffer,
     *  - VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
     *  - VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     *  - VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
-    *  - VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL_KHR
+    *  - VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL
     *
     * For general, we have no nice opportunity to transition so we do the copy
     * to the shadow unconditionally at the end of the subpass. For transfer
@@ -1689,7 +1689,7 @@ genX(BeginCommandBuffer)(
        VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) {
       struct anv_cmd_graphics_state *gfx = &cmd_buffer->state.gfx;
 
-      const VkCommandBufferInheritanceRenderingInfoKHR *inheritance_info =
+      const VkCommandBufferInheritanceRenderingInfo *inheritance_info =
          vk_get_command_buffer_inheritance_rendering_info(cmd_buffer->vk.level,
                                                           pBeginInfo);
 
@@ -1787,6 +1787,18 @@ genX(BeginCommandBuffer)(
 
       cmd_buffer->state.gfx.dirty |= ANV_CMD_DIRTY_RENDER_TARGETS;
    }
+
+#if GFX_VER >= 8
+   /* Emit the sample pattern at the beginning of the batch because the
+    * default locations emitted at the device initialization might have been
+    * changed by a previous command buffer.
+    *
+    * Do not change that when we're continuing a previous renderpass.
+    */
+   if (cmd_buffer->device->vk.enabled_extensions.EXT_sample_locations &&
+       !(cmd_buffer->usage_flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT))
+      genX(emit_sample_pattern)(&cmd_buffer->batch, NULL);
+#endif
 
 #if GFX_VERx10 >= 75
    if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
@@ -1982,6 +1994,8 @@ genX(CmdExecuteCommands)(
    primary->state.current_pipeline = UINT32_MAX;
    primary->state.current_l3_config = NULL;
    primary->state.current_hash_scale = 0;
+   primary->state.gfx.dirty |= ANV_CMD_DIRTY_DYNAMIC_ALL;
+   primary->state.gfx.push_constant_stages = 0;
 
    /* Each of the secondary command buffers will use its own state base
     * address.  We need to re-emit state base address for the primary after
@@ -2381,15 +2395,15 @@ genX(cmd_buffer_apply_pipe_flushes)(struct anv_cmd_buffer *cmd_buffer)
 
 static void
 cmd_buffer_barrier(struct anv_cmd_buffer *cmd_buffer,
-                   const VkDependencyInfoKHR *dep_info,
+                   const VkDependencyInfo *dep_info,
                    const char *reason)
 {
    /* XXX: Right now, we're really dumb and just flush whatever categories
     * the app asks for.  One of these days we may make this a bit better
     * but right now that's all the hardware allows for in most areas.
     */
-   VkAccessFlags2KHR src_flags = 0;
-   VkAccessFlags2KHR dst_flags = 0;
+   VkAccessFlags2 src_flags = 0;
+   VkAccessFlags2 dst_flags = 0;
 
    for (uint32_t i = 0; i < dep_info->memoryBarrierCount; i++) {
       src_flags |= dep_info->pMemoryBarriers[i].srcAccessMask;
@@ -2402,7 +2416,7 @@ cmd_buffer_barrier(struct anv_cmd_buffer *cmd_buffer,
    }
 
    for (uint32_t i = 0; i < dep_info->imageMemoryBarrierCount; i++) {
-      const VkImageMemoryBarrier2KHR *img_barrier =
+      const VkImageMemoryBarrier2 *img_barrier =
          &dep_info->pImageMemoryBarriers[i];
 
       src_flags |= img_barrier->srcAccessMask;
@@ -2462,9 +2476,9 @@ cmd_buffer_barrier(struct anv_cmd_buffer *cmd_buffer,
    anv_add_pending_pipe_bits(cmd_buffer, bits, reason);
 }
 
-void genX(CmdPipelineBarrier2KHR)(
+void genX(CmdPipelineBarrier2)(
     VkCommandBuffer                             commandBuffer,
-    const VkDependencyInfoKHR*                  pDependencyInfo)
+    const VkDependencyInfo*                     pDependencyInfo)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
 
@@ -2689,6 +2703,7 @@ emit_binding_table(struct anv_cmd_buffer *cmd_buffer,
          const struct anv_descriptor *desc = &set->descriptors[binding->index];
 
          switch (desc->type) {
+         case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
          case VK_DESCRIPTOR_TYPE_SAMPLER:
             /* Nothing for us to do here */
             continue;
@@ -4036,23 +4051,23 @@ genX(cmd_buffer_flush_state)(struct anv_cmd_buffer *cmd_buffer)
 
    cmd_buffer_emit_clip(cmd_buffer);
 
-   if (anv_cmd_buffer_needs_dynamic_state(cmd_buffer,
-                                          ANV_CMD_DIRTY_DYNAMIC_RASTERIZER_DISCARD_ENABLE))
+   if (cmd_buffer->state.gfx.dirty & (ANV_CMD_DIRTY_PIPELINE |
+                                      ANV_CMD_DIRTY_DYNAMIC_RASTERIZER_DISCARD_ENABLE |
+                                      ANV_CMD_DIRTY_XFB_ENABLE))
       cmd_buffer_emit_streamout(cmd_buffer);
 
-   if (anv_cmd_buffer_needs_dynamic_state(cmd_buffer,
-                                          ANV_CMD_DIRTY_DYNAMIC_SCISSOR |
-                                          ANV_CMD_DIRTY_RENDER_TARGETS |
-                                          ANV_CMD_DIRTY_DYNAMIC_VIEWPORT)) {
+   if (cmd_buffer->state.gfx.dirty & (ANV_CMD_DIRTY_DYNAMIC_SCISSOR |
+                                      ANV_CMD_DIRTY_RENDER_TARGETS |
+                                      ANV_CMD_DIRTY_DYNAMIC_VIEWPORT |
+                                      ANV_CMD_DIRTY_PIPELINE)) {
       cmd_buffer_emit_viewport(cmd_buffer);
       cmd_buffer_emit_depth_viewport(cmd_buffer,
                                      pipeline->depth_clamp_enable);
    }
 
-   if (anv_cmd_buffer_needs_dynamic_state(cmd_buffer,
-                                          ANV_CMD_DIRTY_DYNAMIC_SCISSOR |
-                                          ANV_CMD_DIRTY_RENDER_TARGETS |
-                                          ANV_CMD_DIRTY_DYNAMIC_VIEWPORT))
+   if (cmd_buffer->state.gfx.dirty & (ANV_CMD_DIRTY_DYNAMIC_SCISSOR |
+                                      ANV_CMD_DIRTY_RENDER_TARGETS |
+                                      ANV_CMD_DIRTY_DYNAMIC_VIEWPORT))
       cmd_buffer_emit_scissor(cmd_buffer);
 
    genX(cmd_buffer_flush_dynamic_state)(cmd_buffer);
@@ -5115,10 +5130,12 @@ emit_indirect_3dmesh_1d(struct anv_batch *batch,
                         bool uses_drawid)
 {
    uint32_t len = GENX(3DMESH_1D_length) + uses_drawid;
-   anv_batch_emitn(batch, len, GENX(3DMESH_1D),
+   uint32_t *dw = anv_batch_emitn(batch, len, GENX(3DMESH_1D),
                    .PredicateEnable           = predicate_enable,
                    .IndirectParameterEnable   = true,
                    .ExtendedParameter0Present = uses_drawid);
+   if (uses_drawid)
+      dw[len - 1] = 0;
 }
 
 void
@@ -6528,6 +6545,8 @@ void genX(CmdBeginRendering)(
    if (result != VK_SUCCESS)
       return;
 
+   genX(flush_pipeline_select_3d)(cmd_buffer);
+
    for (uint32_t i = 0; i < gfx->color_att_count; i++) {
       if (!(color_att_valid & BITFIELD_BIT(i)))
          continue;
@@ -7197,7 +7216,7 @@ void genX(CmdEndRendering)(
     *  - VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
     *  - VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     *  - VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
-    *  - VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL_KHR
+    *  - VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL
     *
     * For general, we have no nice opportunity to transition so we do the copy
     * to the shadow unconditionally at the end of the subpass. For transfer
@@ -7300,20 +7319,20 @@ void genX(CmdEndConditionalRenderingEXT)(
  * by the command streamer for later execution.
  */
 #define ANV_PIPELINE_STAGE_PIPELINED_BITS \
-   ~(VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT_KHR | \
-     VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT_KHR | \
-     VK_PIPELINE_STAGE_2_HOST_BIT_KHR | \
+   ~(VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | \
+     VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | \
+     VK_PIPELINE_STAGE_2_HOST_BIT | \
      VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT)
 
-void genX(CmdSetEvent2KHR)(
+void genX(CmdSetEvent2)(
     VkCommandBuffer                             commandBuffer,
     VkEvent                                     _event,
-    const VkDependencyInfoKHR*                  pDependencyInfo)
+    const VkDependencyInfo*                     pDependencyInfo)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_event, event, _event);
 
-   VkPipelineStageFlags2KHR src_stages = 0;
+   VkPipelineStageFlags2 src_stages = 0;
 
    for (uint32_t i = 0; i < pDependencyInfo->memoryBarrierCount; i++)
       src_stages |= pDependencyInfo->pMemoryBarriers[i].srcStageMask;
@@ -7342,10 +7361,10 @@ void genX(CmdSetEvent2KHR)(
    }
 }
 
-void genX(CmdResetEvent2KHR)(
+void genX(CmdResetEvent2)(
     VkCommandBuffer                             commandBuffer,
     VkEvent                                     _event,
-    VkPipelineStageFlags2KHR                    stageMask)
+    VkPipelineStageFlags2                       stageMask)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_event, event, _event);
@@ -7370,11 +7389,11 @@ void genX(CmdResetEvent2KHR)(
    }
 }
 
-void genX(CmdWaitEvents2KHR)(
+void genX(CmdWaitEvents2)(
     VkCommandBuffer                             commandBuffer,
     uint32_t                                    eventCount,
     const VkEvent*                              pEvents,
-    const VkDependencyInfoKHR*                  pDependencyInfos)
+    const VkDependencyInfo*                     pDependencyInfos)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
 

@@ -43,6 +43,9 @@
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
 #include <vulkan/vulkan_wayland.h>
 #endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+#include <vulkan/vulkan_win32.h>
+#endif
 
 typedef struct __DRIkopperExtensionRec          __DRIkopperExtension;
 typedef struct __DRIkopperLoaderExtensionRec    __DRIkopperLoaderExtension;
@@ -70,6 +73,8 @@ struct __DRIkopperExtensionRec {
                                         const __DRIconfig *config,
                                         void *loaderPrivate,
                                         int pixmap);
+    int64_t (*swapBuffers)(__DRIdrawable *draw);
+    void (*setSwapInterval)(__DRIdrawable *drawable, int interval);
 };
 
 /**
@@ -84,6 +89,9 @@ struct kopper_loader_info {
 #endif
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
       VkWaylandSurfaceCreateInfoKHR wl;
+#endif
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+      VkWin32SurfaceCreateInfoKHR win32;
 #endif
    };
    int has_alpha;

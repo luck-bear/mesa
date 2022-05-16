@@ -67,14 +67,14 @@ struct pvr_compute_kernel_info {
    uint32_t usc_unified_size;
    uint32_t pds_temp_size;
    uint32_t pds_data_size;
-   bool usc_target_any;
+   enum PVRX(CDMCTRL_USC_TARGET) usc_target;
    bool is_fence;
    uint32_t pds_data_offset;
    uint32_t pds_code_offset;
    enum PVRX(CDMCTRL_SD_TYPE) sd_type;
    bool usc_common_shared;
-   uint32_t local_size[3];
-   uint32_t global_size[3];
+   uint32_t local_size[PVR_WORKGROUP_DIMENSIONS];
+   uint32_t global_size[PVR_WORKGROUP_DIMENSIONS];
    uint32_t max_instances;
 };
 
@@ -1134,10 +1134,11 @@ static void pvr_sub_cmd_compute_job_init(struct pvr_device *device,
 #define PIXEL_ALLOCATION_SIZE_MAX_IN_BLOCKS \
    (1024 / PVRX(CDMCTRL_KERNEL0_USC_COMMON_SIZE_UNIT_SIZE))
 
-static uint32_t pvr_compute_slot_size(const struct pvr_device_info *dev_info,
-                                      uint32_t coeff_regs_count,
-                                      bool use_barrier,
-                                      const uint32_t local_size[static 3U])
+static uint32_t
+pvr_compute_flat_slot_size(const struct pvr_device_info *dev_info,
+                           uint32_t coeff_regs_count,
+                           bool use_barrier,
+                           uint32_t total_workitems)
 {
    uint32_t max_workgroups_per_task = ROGUE_CDM_MAX_PACKED_WORKGROUPS_PER_TASK;
    uint32_t max_avail_coeff_regs =
@@ -1145,7 +1146,6 @@ static uint32_t pvr_compute_slot_size(const struct pvr_device_info *dev_info,
    uint32_t localstore_chunks_count =
       DIV_ROUND_UP(coeff_regs_count << 2,
                    PVRX(CDMCTRL_KERNEL0_USC_COMMON_SIZE_UNIT_SIZE));
-   uint32_t total_workitems = local_size[0U] * local_size[1U] * local_size[2U];
 
    /* Ensure that we cannot have more workgroups in a slot than the available
     * number of coefficients allow us to have.
@@ -1242,12 +1242,7 @@ pvr_compute_generate_control_stream(struct pvr_csb *csb,
       kernel0.usc_unified_size = info->usc_unified_size;
       kernel0.pds_temp_size = info->pds_temp_size;
       kernel0.pds_data_size = info->pds_data_size;
-
-      if (info->usc_target_any)
-         kernel0.usc_target = PVRX(CDMCTRL_USC_TARGET_ANY);
-      else
-         kernel0.usc_target = PVRX(CDMCTRL_USC_TARGET_ALL);
-
+      kernel0.usc_target = info->usc_target;
       kernel0.fence = info->is_fence;
    }
 
@@ -1330,7 +1325,7 @@ static void pvr_compute_generate_fence(struct pvr_cmd_buffer *cmd_buffer,
       .pds_data_size =
          DIV_ROUND_UP(program->data_size << 2,
                       PVRX(CDMCTRL_KERNEL0_PDS_DATA_SIZE_UNIT_SIZE)),
-      .usc_target_any = true,
+      .usc_target = PVRX(CDMCTRL_USC_TARGET_ANY),
       .is_fence = true,
       .pds_data_offset = program->data_offset,
       .sd_type = PVRX(CDMCTRL_SD_TYPE_PDS),
@@ -1344,8 +1339,7 @@ static void pvr_compute_generate_fence(struct pvr_cmd_buffer *cmd_buffer,
    /* Here we calculate the slot size. This can depend on the use of barriers,
     * local memory, BRN's or other factors.
     */
-   info.max_instances =
-      pvr_compute_slot_size(dev_info, 0U, false, info.local_size);
+   info.max_instances = pvr_compute_flat_slot_size(dev_info, 0U, false, 1U);
 
    pvr_compute_generate_control_stream(csb, &info);
 }
@@ -2496,75 +2490,13 @@ VkResult pvr_cmd_buffer_add_transfer_cmd(struct pvr_cmd_buffer *cmd_buffer,
    return VK_SUCCESS;
 }
 
-void pvr_CmdDispatch(VkCommandBuffer commandBuffer,
-                     uint32_t groupCountX,
-                     uint32_t groupCountY,
-                     uint32_t groupCountZ)
-{
-   assert(!"Unimplemented");
-}
-
-void pvr_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
-                             VkBuffer _buffer,
-                             VkDeviceSize offset)
-{
-   assert(!"Unimplemented");
-}
-
-void pvr_CmdDraw(VkCommandBuffer commandBuffer,
-                 uint32_t vertexCount,
-                 uint32_t instanceCount,
-                 uint32_t firstVertex,
-                 uint32_t firstInstance)
-{
-   assert(!"Unimplemented");
-}
-
 static void
-pvr_update_draw_state(struct pvr_cmd_buffer_state *const state,
-                      const struct pvr_cmd_buffer_draw_state *const draw_state)
+pvr_validate_push_descriptors(struct pvr_cmd_buffer *cmd_buffer,
+                              bool *const push_descriptors_dirty_out)
 {
-   /* We don't have a state to tell us that base_instance is being used so it
-    * gets used as a boolean - 0 means we'll use a pds program that skips the
-    * base instance addition. If the base_instance gets used (and the last
-    * draw's base_instance was 0) then we switch to the BASE_INSTANCE attrib
-    * program.
-    *
-    * If base_instance changes then we only need to update the data section.
-    *
-    * The only draw call state that doesn't really matter is the start vertex
-    * as that is handled properly in the VDM state in all cases.
-    */
-   if ((state->draw_state.draw_indexed != draw_state->draw_indexed) ||
-       (state->draw_state.draw_indirect != draw_state->draw_indirect) ||
-       (state->draw_state.base_instance == 0 &&
-        draw_state->base_instance != 0)) {
-      state->dirty.draw_variant = true;
-   } else if (state->draw_state.base_instance != draw_state->base_instance) {
-      state->dirty.draw_base_instance = true;
-   }
-
-   state->draw_state = *draw_state;
-}
-
-static uint32_t pvr_calc_shared_regs_count(
-   const struct pvr_graphics_pipeline *const gfx_pipeline)
-{
-   const struct pvr_pipeline_stage_state *const vertex_state =
-      &gfx_pipeline->vertex_shader_state.stage_state;
-   uint32_t shared_regs = vertex_state->const_shared_reg_count +
-                          vertex_state->const_shared_reg_offset;
-
-   if (gfx_pipeline->fragment_shader_state.bo) {
-      const struct pvr_pipeline_stage_state *const fragment_state =
-         &gfx_pipeline->fragment_shader_state.stage_state;
-      uint32_t fragment_regs = fragment_state->const_shared_reg_count +
-                               fragment_state->const_shared_reg_offset;
-
-      shared_regs = MAX2(shared_regs, fragment_regs);
-   }
-
-   return shared_regs;
+   /* TODO: Implement this function, based on ValidatePushDescriptors. */
+   pvr_finishme("Add support for push descriptors!");
+   *push_descriptors_dirty_out = false;
 }
 
 #define PVR_WRITE(_buffer, _value, _offset, _max)                \
@@ -2694,16 +2626,18 @@ static VkResult pvr_setup_descriptor_mappings(
    struct pvr_cmd_buffer *const cmd_buffer,
    enum pvr_stage_allocation stage,
    const struct pvr_stage_allocation_uniform_state *uniform_state,
+   UNUSED const pvr_dev_addr_t *const num_worgroups_buff_addr,
    uint32_t *const uniform_data_offset_out)
 {
    const struct pvr_pds_info *const pds_info = &uniform_state->pds_info;
-   const struct pvr_cmd_buffer_state *const state = &cmd_buffer->state;
    const struct pvr_descriptor_state *desc_state;
    const uint8_t *entries;
    uint32_t *dword_buffer;
    uint64_t *qword_buffer;
    struct pvr_bo *pvr_bo;
    VkResult result;
+
+   pvr_finishme("Handle num_worgroups_buff_addr");
 
    if (!pds_info->data_size_in_dwords)
       return VK_SUCCESS;
@@ -2740,6 +2674,13 @@ static VkResult pvr_setup_descriptor_mappings(
       const struct pvr_const_map_entry *const entry_header =
          (struct pvr_const_map_entry *)entries;
 
+      /* TODO: See if instead of reusing the blend constant buffer type entry,
+       * we can setup a new buffer type specifically for num_workgroups or other
+       * built-in variables. The mappings are setup at pipeline creation when
+       * creating the uniform program.
+       */
+      pvr_finishme("Handle blend constant reuse for compute.");
+
       switch (entry_header->type) {
       case PVR_PDS_CONST_MAP_ENTRY_TYPE_LITERAL32: {
          const struct pvr_const_map_entry_literal32 *const literal =
@@ -2766,7 +2707,7 @@ static VkResult pvr_setup_descriptor_mappings(
          /* TODO: Handle push descriptors. */
 
          assert(desc_set < PVR_MAX_DESCRIPTOR_SETS);
-         descriptor_set = state->gfx_desc_state.descriptor_sets[desc_set];
+         descriptor_set = desc_state->descriptor_sets[desc_set];
 
          /* TODO: Handle dynamic buffers. */
          descriptor = &descriptor_set->descriptors[binding];
@@ -2877,6 +2818,311 @@ static VkResult pvr_setup_descriptor_mappings(
 }
 
 #undef PVR_WRITE
+
+static void pvr_compute_update_shared(struct pvr_cmd_buffer *cmd_buffer)
+{
+   const struct pvr_device_info *dev_info =
+      &cmd_buffer->device->pdevice->dev_info;
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   struct pvr_csb *csb = &state->current_sub_cmd->compute.control_stream;
+   const struct pvr_compute_pipeline *pipeline = state->compute_pipeline;
+   const uint32_t const_shared_reg_count =
+      pipeline->state.shader.const_shared_reg_count;
+   struct pvr_compute_kernel_info info;
+
+   /* No shared regs, no need to use an allocation kernel. */
+   if (!const_shared_reg_count)
+      return;
+
+   info = (struct pvr_compute_kernel_info){
+      .indirect_buffer_addr.addr = 0ULL,
+      .sd_type = PVRX(CDMCTRL_SD_TYPE_NONE),
+
+      .usc_target = PVRX(CDMCTRL_USC_TARGET_ALL),
+      .usc_common_shared = true,
+      .usc_common_size =
+         DIV_ROUND_UP(const_shared_reg_count,
+                      PVRX(CDMCTRL_KERNEL0_USC_COMMON_SIZE_UNIT_SIZE)),
+
+      .local_size = { 1, 1, 1 },
+      .global_size = { 1, 1, 1 },
+   };
+
+   /* Sometimes we don't have a secondary program if there were no constants to
+    * write, but we still need to run a PDS program to accomplish the
+    * allocation of the local/common store shared registers so we repurpose the
+    * deallocation PDS program.
+    */
+   if (pipeline->state.uniform.pds_info.code_size_in_dwords) {
+      uint32_t pds_data_size_in_dwords =
+         pipeline->state.uniform.pds_info.data_size_in_dwords;
+
+      info.pds_data_offset = state->pds_compute_uniform_data_offset;
+      info.pds_data_size =
+         DIV_ROUND_UP(pds_data_size_in_dwords << 2U,
+                      PVRX(CDMCTRL_KERNEL0_PDS_DATA_SIZE_UNIT_SIZE));
+
+      /* Check that we have upload the code section. */
+      assert(pipeline->state.uniform.pds_code.code_size);
+      info.pds_code_offset = pipeline->state.uniform.pds_code.code_offset;
+   } else {
+      /* FIXME: There should be a deallocation pds program already uploaded
+       * that we use at this point.
+       */
+      assert(!"Unimplemented");
+   }
+
+   /* We don't need to pad the workgroup size. */
+
+   info.max_instances =
+      pvr_compute_flat_slot_size(dev_info, const_shared_reg_count, false, 1U);
+
+   pvr_compute_generate_control_stream(csb, &info);
+}
+
+static uint32_t
+pvr_compute_flat_pad_workgroup_size(const struct pvr_device_info *dev_info,
+                                    uint32_t workgroup_size,
+                                    uint32_t coeff_regs_count)
+{
+   uint32_t max_avail_coeff_regs =
+      rogue_get_cdm_max_local_mem_size_regs(dev_info);
+   uint32_t coeff_regs_count_aligned =
+      ALIGN_POT(coeff_regs_count,
+                PVRX(CDMCTRL_KERNEL0_USC_COMMON_SIZE_UNIT_SIZE) >> 2U);
+
+   /* If the work group size is > ROGUE_MAX_INSTANCES_PER_TASK. We now *always*
+    * pad the work group size to the next multiple of
+    * ROGUE_MAX_INSTANCES_PER_TASK.
+    *
+    * If we use more than 1/8th of the max coefficient registers then we round
+    * work group size up to the next multiple of ROGUE_MAX_INSTANCES_PER_TASK
+    */
+   /* TODO: See if this can be optimized. */
+   if (workgroup_size > ROGUE_MAX_INSTANCES_PER_TASK ||
+       coeff_regs_count_aligned > (max_avail_coeff_regs / 8)) {
+      assert(workgroup_size < rogue_get_compute_max_work_group_size(dev_info));
+
+      return ALIGN_POT(workgroup_size, ROGUE_MAX_INSTANCES_PER_TASK);
+   }
+
+   return workgroup_size;
+}
+
+/* TODO: Wire up the base_workgroup variant program when implementing
+ * VK_KHR_device_group. The values will also need patching into the program.
+ */
+static void pvr_compute_update_kernel(
+   struct pvr_cmd_buffer *cmd_buffer,
+   const uint32_t global_workgroup_size[static const PVR_WORKGROUP_DIMENSIONS])
+{
+   const struct pvr_device_info *dev_info =
+      &cmd_buffer->device->pdevice->dev_info;
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   struct pvr_csb *csb = &state->current_sub_cmd->compute.control_stream;
+   const struct pvr_compute_pipeline *pipeline = state->compute_pipeline;
+   const struct pvr_pds_info *program_info =
+      &pipeline->state.primary_program_info;
+
+   struct pvr_compute_kernel_info info = {
+      .indirect_buffer_addr.addr = 0ULL,
+      .usc_target = PVRX(CDMCTRL_USC_TARGET_ANY),
+      .pds_temp_size =
+         DIV_ROUND_UP(program_info->temps_required << 2U,
+                      PVRX(CDMCTRL_KERNEL0_PDS_TEMP_SIZE_UNIT_SIZE)),
+
+      .pds_data_size =
+         DIV_ROUND_UP(program_info->data_size_in_dwords << 2U,
+                      PVRX(CDMCTRL_KERNEL0_PDS_DATA_SIZE_UNIT_SIZE)),
+      .pds_data_offset = pipeline->state.primary_program.data_offset,
+      .pds_code_offset = pipeline->state.primary_program.code_offset,
+
+      .sd_type = PVRX(CDMCTRL_SD_TYPE_USC),
+
+      .usc_unified_size =
+         DIV_ROUND_UP(pipeline->state.shader.input_register_count << 2U,
+                      PVRX(CDMCTRL_KERNEL0_USC_UNIFIED_SIZE_UNIT_SIZE)),
+
+      /* clang-format off */
+      .global_size = {
+         global_workgroup_size[0],
+         global_workgroup_size[1],
+         global_workgroup_size[2]
+      },
+      /* clang-format on */
+   };
+
+   uint32_t work_size = pipeline->state.shader.work_size;
+   uint32_t coeff_regs;
+
+   if (work_size > ROGUE_MAX_INSTANCES_PER_TASK) {
+      /* Enforce a single workgroup per cluster through allocation starvation.
+       */
+      coeff_regs = rogue_get_cdm_max_local_mem_size_regs(dev_info);
+   } else {
+      coeff_regs = pipeline->state.shader.coefficient_register_count;
+   }
+
+   info.usc_common_size =
+      DIV_ROUND_UP(coeff_regs << 2U,
+                   PVRX(CDMCTRL_KERNEL0_USC_COMMON_SIZE_UNIT_SIZE));
+
+   /* Use a whole slot per workgroup. */
+   work_size = MAX2(work_size, ROGUE_MAX_INSTANCES_PER_TASK);
+
+   coeff_regs += pipeline->state.shader.const_shared_reg_count;
+
+   work_size =
+      pvr_compute_flat_pad_workgroup_size(dev_info, work_size, coeff_regs);
+
+   info.local_size[0] = work_size;
+   info.local_size[1] = 1U;
+   info.local_size[2] = 1U;
+
+   info.max_instances =
+      pvr_compute_flat_slot_size(dev_info, coeff_regs, false, work_size);
+
+   pvr_compute_generate_control_stream(csb, &info);
+}
+
+void pvr_CmdDispatch(VkCommandBuffer commandBuffer,
+                     uint32_t groupCountX,
+                     uint32_t groupCountY,
+                     uint32_t groupCountZ)
+{
+   const uint32_t workgroup_size[] = { groupCountX, groupCountY, groupCountZ };
+   PVR_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   const struct pvr_compute_pipeline *compute_pipeline =
+      state->compute_pipeline;
+   const VkShaderStageFlags push_consts_stage_mask =
+      compute_pipeline->base.layout->push_constants_shader_stages;
+   bool push_descriptors_dirty;
+   struct pvr_sub_cmd *sub_cmd;
+   VkResult result;
+
+   PVR_CHECK_COMMAND_BUFFER_BUILDING_STATE(cmd_buffer);
+   assert(compute_pipeline);
+
+   if (!groupCountX || !groupCountY || !groupCountZ)
+      return;
+
+   pvr_cmd_buffer_start_sub_cmd(cmd_buffer, PVR_SUB_CMD_TYPE_COMPUTE);
+
+   sub_cmd = state->current_sub_cmd;
+
+   sub_cmd->compute.uses_atomic_ops |=
+      compute_pipeline->state.shader.uses_atomic_ops;
+   sub_cmd->compute.uses_barrier |= compute_pipeline->state.shader.uses_barrier;
+
+   if (push_consts_stage_mask & VK_SHADER_STAGE_COMPUTE_BIT) {
+      /* TODO: Add a dirty push constants mask in the cmd_buffer state and
+       * check for dirty compute stage.
+       */
+      pvr_finishme("Add support for push constants.");
+   }
+
+   pvr_validate_push_descriptors(cmd_buffer, &push_descriptors_dirty);
+
+   if (compute_pipeline->state.shader.uses_num_workgroups) {
+      struct pvr_bo *num_workgroups_bo;
+
+      result = pvr_cmd_buffer_upload_general(cmd_buffer,
+                                             workgroup_size,
+                                             sizeof(workgroup_size),
+                                             &num_workgroups_bo);
+      if (result != VK_SUCCESS)
+         return;
+
+      result =
+         pvr_setup_descriptor_mappings(cmd_buffer,
+                                       PVR_STAGE_ALLOCATION_COMPUTE,
+                                       &compute_pipeline->state.uniform,
+                                       &num_workgroups_bo->vma->dev_addr,
+                                       &state->pds_compute_uniform_data_offset);
+      if (result != VK_SUCCESS)
+         return;
+   } else if ((compute_pipeline->base.layout
+                  ->per_stage_descriptor_masks[PVR_STAGE_ALLOCATION_COMPUTE] &&
+               state->dirty.compute_desc_dirty) ||
+              state->dirty.compute_pipeline_binding || push_descriptors_dirty) {
+      result =
+         pvr_setup_descriptor_mappings(cmd_buffer,
+                                       PVR_STAGE_ALLOCATION_COMPUTE,
+                                       &compute_pipeline->state.uniform,
+                                       NULL,
+                                       &state->pds_compute_uniform_data_offset);
+      if (result != VK_SUCCESS)
+         return;
+   }
+
+   pvr_compute_update_shared(cmd_buffer);
+
+   pvr_compute_update_kernel(cmd_buffer, workgroup_size);
+}
+
+void pvr_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
+                             VkBuffer _buffer,
+                             VkDeviceSize offset)
+{
+   assert(!"Unimplemented");
+}
+
+void pvr_CmdDraw(VkCommandBuffer commandBuffer,
+                 uint32_t vertexCount,
+                 uint32_t instanceCount,
+                 uint32_t firstVertex,
+                 uint32_t firstInstance)
+{
+   assert(!"Unimplemented");
+}
+
+static void
+pvr_update_draw_state(struct pvr_cmd_buffer_state *const state,
+                      const struct pvr_cmd_buffer_draw_state *const draw_state)
+{
+   /* We don't have a state to tell us that base_instance is being used so it
+    * gets used as a boolean - 0 means we'll use a pds program that skips the
+    * base instance addition. If the base_instance gets used (and the last
+    * draw's base_instance was 0) then we switch to the BASE_INSTANCE attrib
+    * program.
+    *
+    * If base_instance changes then we only need to update the data section.
+    *
+    * The only draw call state that doesn't really matter is the start vertex
+    * as that is handled properly in the VDM state in all cases.
+    */
+   if ((state->draw_state.draw_indexed != draw_state->draw_indexed) ||
+       (state->draw_state.draw_indirect != draw_state->draw_indirect) ||
+       (state->draw_state.base_instance == 0 &&
+        draw_state->base_instance != 0)) {
+      state->dirty.draw_variant = true;
+   } else if (state->draw_state.base_instance != draw_state->base_instance) {
+      state->dirty.draw_base_instance = true;
+   }
+
+   state->draw_state = *draw_state;
+}
+
+static uint32_t pvr_calc_shared_regs_count(
+   const struct pvr_graphics_pipeline *const gfx_pipeline)
+{
+   const struct pvr_pipeline_stage_state *const vertex_state =
+      &gfx_pipeline->vertex_shader_state.stage_state;
+   uint32_t shared_regs = vertex_state->const_shared_reg_count +
+                          vertex_state->const_shared_reg_offset;
+
+   if (gfx_pipeline->fragment_shader_state.bo) {
+      const struct pvr_pipeline_stage_state *const fragment_state =
+         &gfx_pipeline->fragment_shader_state.stage_state;
+      uint32_t fragment_regs = fragment_state->const_shared_reg_count +
+                               fragment_state->const_shared_reg_offset;
+
+      shared_regs = MAX2(shared_regs, fragment_regs);
+   }
+
+   return shared_regs;
+}
 
 static void
 pvr_emit_dirty_pds_state(const struct pvr_cmd_buffer *const cmd_buffer,
@@ -3963,15 +4209,6 @@ pvr_emit_dirty_ppp_state(struct pvr_cmd_buffer *const cmd_buffer)
 }
 
 static void
-pvr_validate_push_descriptors(struct pvr_cmd_buffer *cmd_buffer,
-                              bool *const push_descriptors_dirty_out)
-{
-   /* TODO: Implement this function, based on ValidatePushDescriptors. */
-   pvr_finishme("Add support for push descriptors!");
-   *push_descriptors_dirty_out = false;
-}
-
-static void
 pvr_calculate_vertex_cam_size(const struct pvr_device_info *dev_info,
                               const uint32_t vs_output_size,
                               const bool raster_enable,
@@ -4284,6 +4521,7 @@ static VkResult pvr_validate_draw_state(struct pvr_cmd_buffer *cmd_buffer)
          cmd_buffer,
          PVR_STAGE_ALLOCATION_FRAGMENT,
          &state->gfx_pipeline->fragment_shader_state.uniform_state,
+         NULL,
          &state->pds_fragment_uniform_data_offset);
       if (result != VK_SUCCESS) {
          mesa_loge("Could not setup fragment descriptor mappings.");
@@ -4298,6 +4536,7 @@ static VkResult pvr_validate_draw_state(struct pvr_cmd_buffer *cmd_buffer)
          cmd_buffer,
          PVR_STAGE_ALLOCATION_VERTEX_GEOMETRY,
          &state->gfx_pipeline->vertex_shader_state.uniform_state,
+         NULL,
          &pds_vertex_uniform_data_offset);
       if (result != VK_SUCCESS) {
          mesa_loge("Could not setup vertex descriptor mappings.");

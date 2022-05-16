@@ -45,6 +45,7 @@ EXTENSIONS = [
     Extension("VK_KHR_wayland_surface"),
     Extension("VK_KHR_xcb_surface",
               conditions=["!instance_info->disable_xcb_surface"]),
+    Extension("VK_KHR_win32_surface"),
 ]
 
 # constructor: Layer(name, conditions=[])
@@ -90,8 +91,8 @@ struct zink_instance_info {
 %endfor
 };
 
-VkInstance
-zink_create_instance(struct zink_instance_info *instance_info);
+bool
+zink_create_instance(struct zink_screen *screen);
 
 void
 zink_verify_instance_extensions(struct zink_screen *screen);
@@ -112,7 +113,6 @@ void zink_stub_${cmd.lstrip("vk")}(void);
 
 struct pipe_screen;
 struct pipe_resource;
-bool zink_kopper_update(struct pipe_screen *pscreen, struct pipe_resource *pres, int *w, int *h);
 
 #endif
 """
@@ -121,9 +121,11 @@ impl_code = """
 #include "zink_instance.h"
 #include "zink_screen.h"
 
-VkInstance
-zink_create_instance(struct zink_instance_info *instance_info)
+bool
+zink_create_instance(struct zink_screen *screen)
 {
+   struct zink_instance_info *instance_info = &screen->instance_info;
+
    /* reserve one slot for MoltenVK */
    const char *layers[${len(layers) + 1}] = {0};
    uint32_t num_layers = 0;
@@ -143,14 +145,20 @@ zink_create_instance(struct zink_instance_info *instance_info)
    bool have_moltenvk_layer = false;
 #endif
 
+   GET_PROC_ADDR_INSTANCE_LOCAL(screen, NULL, EnumerateInstanceExtensionProperties);
+   GET_PROC_ADDR_INSTANCE_LOCAL(screen, NULL, EnumerateInstanceLayerProperties);
+   if (!vk_EnumerateInstanceExtensionProperties ||
+       !vk_EnumerateInstanceLayerProperties)
+      return false;
+
    // Build up the extensions from the reported ones but only for the unnamed layer
    uint32_t extension_count = 0;
-   if (vkEnumerateInstanceExtensionProperties(NULL, &extension_count, NULL) != VK_SUCCESS) {
+   if (vk_EnumerateInstanceExtensionProperties(NULL, &extension_count, NULL) != VK_SUCCESS) {
        mesa_loge("ZINK: vkEnumerateInstanceExtensionProperties failed");
    } else {
        VkExtensionProperties *extension_props = malloc(extension_count * sizeof(VkExtensionProperties));
        if (extension_props) {
-           if (vkEnumerateInstanceExtensionProperties(NULL, &extension_count, extension_props) != VK_SUCCESS) {
+           if (vk_EnumerateInstanceExtensionProperties(NULL, &extension_count, extension_props) != VK_SUCCESS) {
               mesa_loge("ZINK: vkEnumerateInstanceExtensionProperties failed");
            } else {
               for (uint32_t i = 0; i < extension_count; i++) {
@@ -168,12 +176,12 @@ zink_create_instance(struct zink_instance_info *instance_info)
     // Build up the layers from the reported ones
     uint32_t layer_count = 0;
 
-    if (vkEnumerateInstanceLayerProperties(&layer_count, NULL) != VK_SUCCESS) {
+    if (vk_EnumerateInstanceLayerProperties(&layer_count, NULL) != VK_SUCCESS) {
         mesa_loge("ZINK: vkEnumerateInstanceLayerProperties failed");
     } else {
         VkLayerProperties *layer_props = malloc(layer_count * sizeof(VkLayerProperties));
         if (layer_props) {
-            if (vkEnumerateInstanceLayerProperties(&layer_count, layer_props) != VK_SUCCESS) {
+            if (vk_EnumerateInstanceLayerProperties(&layer_count, layer_props) != VK_SUCCESS) {
                 mesa_loge("ZINK: vkEnumerateInstanceLayerProperties failed");
             } else {
                for (uint32_t i = 0; i < layer_count; i++) {
@@ -242,14 +250,16 @@ zink_create_instance(struct zink_instance_info *instance_info)
    ici.ppEnabledLayerNames = layers;
    ici.enabledLayerCount = num_layers;
 
-   VkInstance instance = VK_NULL_HANDLE;
-   VkResult err = vkCreateInstance(&ici, NULL, &instance);
+   GET_PROC_ADDR_INSTANCE_LOCAL(screen, NULL, CreateInstance);
+   assert(vk_CreateInstance);
+
+   VkResult err = vk_CreateInstance(&ici, NULL, &screen->instance);
    if (err != VK_SUCCESS) {
       mesa_loge("ZINK: vkCreateInstance failed");
-      return VK_NULL_HANDLE;
+      return false;
    }
 
-   return instance;
+   return true;
 }
 
 void

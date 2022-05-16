@@ -65,7 +65,7 @@ struct tgsi_transform_context
 
    /**
     * Called at end of input program to allow caller to append extra
-    * instructions.  Return number of tokens emitted.
+    * instructions.
     */
    void (*epilog)(struct tgsi_transform_context *ctx);
 
@@ -90,6 +90,7 @@ struct tgsi_transform_context
    uint max_tokens_out;
    struct tgsi_token *tokens_out;
    uint ti;
+   bool fail;
 };
 
 
@@ -572,10 +573,9 @@ tgsi_transform_tex_inst(struct tgsi_transform_context *ctx,
 }
 
 
-extern int
+extern struct tgsi_token *
 tgsi_transform_shader(const struct tgsi_token *tokens_in,
-                      struct tgsi_token *tokens_out,
-                      uint max_tokens_out,
+                      uint initial_tokens_len,
                       struct tgsi_transform_context *ctx);
 
 

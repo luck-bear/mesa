@@ -206,7 +206,7 @@ pan_prepare_zs(const struct pan_fb_info *fb,
 #if PAN_ARCH >= 6
                 const struct pan_image_slice_layout *slice = &zs->image->layout.slices[level];
 
-                ext->zs_afbc_row_stride = slice->afbc.row_stride /
+                ext->zs_afbc_row_stride = slice->row_stride /
                                           AFBC_HEADER_BYTES_PER_TILE;
 #else
                 ext->zs_block_format = MALI_BLOCK_FORMAT_AFBC;
@@ -448,10 +448,10 @@ pan_prepare_rt(const struct pan_fb_info *fb, unsigned idx,
                 const struct pan_image_slice_layout *slice = &rt->image->layout.slices[level];
 
 #if PAN_ARCH >= 6
-                cfg->afbc.row_stride = slice->afbc.row_stride /
+                cfg->afbc.row_stride = slice->row_stride /
                                        AFBC_HEADER_BYTES_PER_TILE;
                 cfg->afbc.afbc_wide_block_enable =
-                        panfrost_block_dim(rt->image->layout.modifier, true, 0) > 16;
+                        panfrost_afbc_is_wide(rt->image->layout.modifier);
 #else
                 cfg->afbc.chunk_size = 9;
                 cfg->afbc.sparse = true;
@@ -484,7 +484,19 @@ GENX(pan_emit_tls)(const struct pan_tls_info *info,
                                 panfrost_get_stack_shift(info->tls.size);
 
                         cfg.tls_size = shift;
+#if PAN_ARCH >= 9
+                        /* For now, always use packed TLS addressing. This is
+                         * better for the cache and requires no fix up code in
+                         * the shader. We may need to revisit this someday for
+                         * OpenCL generic pointer support.
+                         */
+                        cfg.tls_address_mode = MALI_ADDRESS_MODE_PACKED;
+
+                        assert((info->tls.ptr & 4095) == 0);
+                        cfg.tls_base_pointer = info->tls.ptr >> 8;
+#else
                         cfg.tls_base_pointer = info->tls.ptr;
+#endif
                 }
 
                 if (info->wls.size) {
@@ -584,7 +596,7 @@ pan_force_clean_write_rt(const struct pan_image_view *rt, unsigned tile_size)
         if (!drm_is_afbc(rt->image->layout.modifier))
                 return false;
 
-        unsigned superblock = panfrost_block_dim(rt->image->layout.modifier, true, 0);
+        unsigned superblock = panfrost_afbc_superblock_width(rt->image->layout.modifier);
 
         assert(superblock >= 16);
         assert(tile_size <= 16*16);
@@ -690,6 +702,10 @@ GENX(pan_emit_fbd)(const struct panfrost_device *dev,
 
                         *valid |= full;
                 }
+
+#if PAN_ARCH >= 9
+                cfg.point_sprite_coord_origin_max_y = fb->sprite_coord_origin;
+#endif
         }
 
 #if PAN_ARCH >= 6

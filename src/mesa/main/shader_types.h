@@ -266,8 +266,6 @@ struct gl_linked_shader
    unsigned num_combined_uniform_components;
 
    struct exec_list *ir;
-   struct exec_list *packed_varyings;
-   struct exec_list *fragdata_arrays;
    struct glsl_symbol_table *symbols;
 
    /**
@@ -567,14 +565,12 @@ struct gl_program
    GLubyte SamplerUnits[MAX_SAMPLERS];
 
    struct pipe_shader_state state;
-   struct glsl_to_tgsi_visitor* glsl_to_tgsi;
    struct ati_fragment_shader *ati_fs;
    uint64_t affected_states; /**< ST_NEW_* flags to mark dirty when binding */
 
    void *serialized_nir;
    unsigned serialized_nir_size;
 
-   /* used when bypassing glsl_to_tgsi: */
    struct gl_shader_program *shader_program;
 
    struct st_variant *variants;

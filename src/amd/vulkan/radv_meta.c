@@ -537,6 +537,8 @@ radv_device_init_meta(struct radv_device *device)
 
    mtx_init(&device->meta_state.mtx, mtx_plain);
 
+   device->app_shaders_internal = true;
+
    result = radv_device_init_meta_clear_state(device, on_demand);
    if (result != VK_SUCCESS)
       goto fail_clear;
@@ -585,9 +587,11 @@ radv_device_init_meta(struct radv_device *device)
    if (result != VK_SUCCESS)
       goto fail_fmask_expand;
 
-   result = radv_device_init_accel_struct_build_state(device);
-   if (result != VK_SUCCESS)
-      goto fail_accel_struct_build;
+   if (radv_enable_rt(device->physical_device)) {
+      result = radv_device_init_accel_struct_build_state(device);
+      if (result != VK_SUCCESS)
+         goto fail_accel_struct_build;
+   }
 
    result = radv_device_init_meta_fmask_copy_state(device);
    if (result != VK_SUCCESS)
@@ -596,6 +600,8 @@ radv_device_init_meta(struct radv_device *device)
    result = radv_device_init_meta_etc_decode_state(device, on_demand);
    if (result != VK_SUCCESS)
       goto fail_etc_decode;
+
+   device->app_shaders_internal = false;
 
    return VK_SUCCESS;
 
@@ -659,7 +665,8 @@ radv_device_finish_meta(struct radv_device *device)
    mtx_destroy(&device->meta_state.mtx);
 }
 
-nir_builder PRINTFLIKE(2, 3) radv_meta_init_shader(gl_shader_stage stage, const char *name, ...)
+nir_builder PRINTFLIKE(3, 4)
+   radv_meta_init_shader(struct radv_device *dev, gl_shader_stage stage, const char *name, ...)
 {
    nir_builder b = nir_builder_init_simple_shader(stage, NULL, NULL);
    if (name) {
@@ -669,6 +676,7 @@ nir_builder PRINTFLIKE(2, 3) radv_meta_init_shader(gl_shader_stage stage, const 
       va_end(args);
    }
 
+   b.shader->options = &dev->physical_device->nir_options[stage];
    b.shader->info.workgroup_size[0] = 1;
    b.shader->info.workgroup_size[1] = 1;
    b.shader->info.workgroup_size[2] = 1;
@@ -688,8 +696,8 @@ radv_meta_gen_rect_vertices_comp2(nir_builder *vs_b, nir_ssa_def *comp2)
    /* so channel 0 is vertex_id != 2 ? -1.0 : 1.0
       channel 1 is vertex id != 1 ? -1.0 : 1.0 */
 
-   nir_ssa_def *c0cmp = nir_ine(vs_b, vertex_id, nir_imm_int(vs_b, 2));
-   nir_ssa_def *c1cmp = nir_ine(vs_b, vertex_id, nir_imm_int(vs_b, 1));
+   nir_ssa_def *c0cmp = nir_ine_imm(vs_b, vertex_id, 2);
+   nir_ssa_def *c1cmp = nir_ine_imm(vs_b, vertex_id, 1);
 
    nir_ssa_def *comp[4];
    comp[0] = nir_bcsel(vs_b, c0cmp, nir_imm_float(vs_b, -1.0), nir_imm_float(vs_b, 1.0));
@@ -710,13 +718,13 @@ radv_meta_gen_rect_vertices(nir_builder *vs_b)
 
 /* vertex shader that generates vertices */
 nir_shader *
-radv_meta_build_nir_vs_generate_vertices(void)
+radv_meta_build_nir_vs_generate_vertices(struct radv_device *dev)
 {
    const struct glsl_type *vec4 = glsl_vec4_type();
 
    nir_variable *v_position;
 
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_VERTEX, "meta_vs_gen_verts");
+   nir_builder b = radv_meta_init_shader(dev, MESA_SHADER_VERTEX, "meta_vs_gen_verts");
 
    nir_ssa_def *outvec = radv_meta_gen_rect_vertices(&b);
 
@@ -729,9 +737,9 @@ radv_meta_build_nir_vs_generate_vertices(void)
 }
 
 nir_shader *
-radv_meta_build_nir_fs_noop(void)
+radv_meta_build_nir_fs_noop(struct radv_device *dev)
 {
-   return radv_meta_init_shader(MESA_SHADER_FRAGMENT, "meta_noop_fs").shader;
+   return radv_meta_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_noop_fs").shader;
 }
 
 void
@@ -778,8 +786,8 @@ radv_meta_build_resolve_shader_core(nir_builder *b, bool is_integer, int samples
       nir_ssa_dest_init(&tex_all_same->instr, &tex_all_same->dest, 1, 1, "tex");
       nir_builder_instr_insert(b, &tex_all_same->instr);
 
-      nir_ssa_def *all_same = nir_ieq(b, &tex_all_same->dest.ssa, nir_imm_bool(b, false));
-      nir_push_if(b, all_same);
+      nir_ssa_def *not_all_same = nir_inot(b, &tex_all_same->dest.ssa);
+      nir_push_if(b, not_all_same);
       for (int i = 1; i < samples; i++) {
          nir_tex_instr *tex_add = nir_tex_instr_create(b->shader, 3);
          tex_add->sampler_dim = GLSL_SAMPLER_DIM_MS;
@@ -844,6 +852,6 @@ radv_break_on_count(nir_builder *b, nir_variable *var, nir_ssa_def *count)
    nir_jump(b, nir_jump_break);
    nir_pop_if(b, NULL);
 
-   counter = nir_iadd(b, counter, nir_imm_int(b, 1));
+   counter = nir_iadd_imm(b, counter, 1);
    nir_store_var(b, var, counter, 0x1);
 }

@@ -56,13 +56,15 @@
 #include <GL/gl.h>
 #include <GL/internal/dri_interface.h>
 #include "kopper_interface.h"
-#include "main/menums.h"
 #include "main/formats.h"
+#include "main/glconfig.h"
+#include "main/menums.h"
 #include "util/xmlconfig.h"
 #include <stdbool.h>
 
-struct gl_config;
-struct gl_context;
+struct __DRIconfigRec {
+    struct gl_config modes;
+};
 
 /**
  * Extensions.
@@ -72,7 +74,6 @@ extern const __DRIswrastExtension driSWRastExtension;
 extern const __DRIdri2Extension driDRI2Extension;
 extern const __DRIdri2Extension swkmsDRI2Extension;
 extern const __DRI2configQueryExtension dri2ConfigQueryExtension;
-extern const __DRIcopySubBufferExtension driCopySubBufferExtension;
 extern const __DRI2flushControlExtension dri2FlushControlExtension;
 
 /**
@@ -310,9 +311,6 @@ driGLFormatToSizedInternalGLFormat(mesa_format format);
 
 extern mesa_format
 driImageFormatToGLFormat(uint32_t image_format);
-
-extern void
-dri2InvalidateDrawable(__DRIdrawable *drawable);
 
 extern const __DRIimageDriverExtension driImageDriverExtension;
 

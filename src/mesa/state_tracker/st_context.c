@@ -480,8 +480,6 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
    uint i;
    struct st_context *st = CALLOC_STRUCT( st_context);
 
-   util_cpu_detect();
-
    st->options = *options;
 
    ctx->st_opts = &st->options;
@@ -570,10 +568,20 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
                        screen->is_format_supported(screen, PIPE_FORMAT_DXT1_SRGBA,
                                                    PIPE_TEXTURE_2D, 0, 0,
                                                    PIPE_BIND_SAMPLER_VIEW);
-   st->transcode_astc = options->transcode_astc &&
-                        screen->is_format_supported(screen, PIPE_FORMAT_DXT5_SRGBA,
-                                                    PIPE_TEXTURE_2D, 0, 0,
-                                                    PIPE_BIND_SAMPLER_VIEW);
+   st->transcode_astc_to_bptc = options->transcode_astc &&
+      screen->is_format_supported(screen, PIPE_FORMAT_BPTC_SRGBA,
+                                  PIPE_TEXTURE_2D, 0, 0,
+                                  PIPE_BIND_SAMPLER_VIEW) &&
+      screen->is_format_supported(screen, PIPE_FORMAT_BPTC_RGBA_UNORM,
+                                  PIPE_TEXTURE_2D, 0, 0,
+                                  PIPE_BIND_SAMPLER_VIEW);
+   st->transcode_astc_to_dxt5 = options->transcode_astc &&
+      screen->is_format_supported(screen, PIPE_FORMAT_DXT5_SRGBA,
+                                  PIPE_TEXTURE_2D, 0, 0,
+                                  PIPE_BIND_SAMPLER_VIEW) &&
+      screen->is_format_supported(screen, PIPE_FORMAT_DXT5_RGBA,
+                                  PIPE_TEXTURE_2D, 0, 0,
+                                  PIPE_BIND_SAMPLER_VIEW);
    st->has_astc_2d_ldr =
       screen->is_format_supported(screen, PIPE_FORMAT_ASTC_4x4_SRGB,
                                   PIPE_TEXTURE_2D, 0, 0, PIPE_BIND_SAMPLER_VIEW);
@@ -601,6 +609,8 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
       screen->get_param(screen, PIPE_CAP_SHADER_PACK_HALF_FLOAT);
    st->has_multi_draw_indirect =
       screen->get_param(screen, PIPE_CAP_MULTI_DRAW_INDIRECT);
+   st->has_indirect_partial_stride =
+      screen->get_param(screen, PIPE_CAP_MULTI_DRAW_INDIRECT_PARTIAL_STRIDE);
    st->has_single_pipe_stat =
       screen->get_param(screen, PIPE_CAP_QUERY_PIPELINE_STATISTICS_SINGLE);
    st->has_indep_blend_func =
@@ -689,17 +699,11 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
 
    ctx->Const.ShaderCompilerOptions[MESA_SHADER_TESS_EVAL].PositionAlwaysPrecise = options->vs_position_always_precise;
 
-   enum pipe_shader_ir preferred_ir = (enum pipe_shader_ir)
-      screen->get_shader_param(screen, PIPE_SHADER_VERTEX,
-                               PIPE_SHADER_CAP_PREFERRED_IR);
-   ctx->Const.UseNIRGLSLLinker = preferred_ir == PIPE_SHADER_IR_NIR;
-
    /* NIR drivers that support tess shaders and compact arrays need to use
     * GLSLTessLevelsAsInputs / PIPE_CAP_GLSL_TESS_LEVELS_AS_INPUTS. The NIR
     * linker doesn't support linking these as compat arrays of sysvals.
     */
    assert(ctx->Const.GLSLTessLevelsAsInputs ||
-      !ctx->Const.UseNIRGLSLLinker ||
       !screen->get_param(screen, PIPE_CAP_NIR_COMPACT_ARRAYS) ||
       !ctx->Extensions.ARB_tessellation_shader);
 
@@ -821,22 +825,11 @@ st_init_driver_functions(struct pipe_screen *screen,
    st_init_flush_functions(screen, functions);
 
    /* GL_ARB_get_program_binary */
-   enum pipe_shader_ir preferred_ir = (enum pipe_shader_ir)
-      screen->get_shader_param(screen, PIPE_SHADER_VERTEX,
-                               PIPE_SHADER_CAP_PREFERRED_IR);
-   if (preferred_ir == PIPE_SHADER_IR_NIR) {
-      functions->ShaderCacheSerializeDriverBlob =  st_serialise_nir_program;
-      functions->ProgramBinarySerializeDriverBlob =
-         st_serialise_nir_program_binary;
-      functions->ProgramBinaryDeserializeDriverBlob =
-         st_deserialise_nir_program;
-   } else {
-      functions->ShaderCacheSerializeDriverBlob =  st_serialise_tgsi_program;
-      functions->ProgramBinarySerializeDriverBlob =
-         st_serialise_tgsi_program_binary;
-      functions->ProgramBinaryDeserializeDriverBlob =
-         st_deserialise_tgsi_program;
-   }
+   functions->ShaderCacheSerializeDriverBlob =  st_serialise_nir_program;
+   functions->ProgramBinarySerializeDriverBlob =
+      st_serialise_nir_program_binary;
+   functions->ProgramBinaryDeserializeDriverBlob =
+      st_deserialise_nir_program;
 }
 
 
@@ -851,8 +844,6 @@ st_create_context(gl_api api, struct pipe_context *pipe,
    struct gl_context *shareCtx = share ? share->ctx : NULL;
    struct dd_function_table funcs;
    struct st_context *st;
-
-   util_cpu_detect();
 
    memset(&funcs, 0, sizeof(funcs));
    st_init_driver_functions(pipe->screen, &funcs, has_egl_image_validate);

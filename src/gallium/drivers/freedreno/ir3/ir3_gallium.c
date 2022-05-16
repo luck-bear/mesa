@@ -102,14 +102,13 @@ dump_shader_info(struct ir3_shader_variant *v,
 static void
 upload_shader_variant(struct ir3_shader_variant *v)
 {
-   struct shader_info *info = &v->shader->nir->info;
-   struct ir3_compiler *compiler = v->shader->compiler;
+   struct ir3_compiler *compiler = v->compiler;
 
    assert(!v->bo);
 
    v->bo =
       fd_bo_new(compiler->dev, v->info.size, FD_BO_NOMAP,
-                "%s:%s", ir3_shader_stage(v), info->name);
+                "%s:%s", ir3_shader_stage(v), v->name);
 
    /* Always include shaders in kernel crash dumps. */
    fd_bo_mark_for_dump(v->bo);
@@ -585,10 +584,10 @@ ir3_update_max_tf_vtx(struct fd_context *ctx,
                       const struct ir3_shader_variant *v)
 {
    struct fd_streamout_stateobj *so = &ctx->streamout;
-   struct ir3_stream_output_info *info = &v->shader->stream_output;
+   const struct ir3_stream_output_info *info = &v->stream_output;
    uint32_t maxvtxcnt = 0x7fffffff;
 
-   if (v->shader->stream_output.num_outputs == 0)
+   if (v->stream_output.num_outputs == 0)
       maxvtxcnt = 0;
    if (so->num_targets == 0)
       maxvtxcnt = 0;

@@ -127,6 +127,14 @@ void si_nir_late_opts(nir_shader *nir)
       more_late_algebraic = false;
       NIR_PASS(more_late_algebraic, nir, nir_opt_algebraic_late);
       NIR_PASS_V(nir, nir_opt_constant_folding);
+
+      /* We should run this after constant folding for stages that support indirect
+       * inputs/outputs.
+       */
+      if (nir->options->support_indirect_inputs & BITFIELD_BIT(nir->info.stage) ||
+          nir->options->support_indirect_outputs & BITFIELD_BIT(nir->info.stage))
+         NIR_PASS_V(nir, nir_io_add_const_offset_to_base, nir_var_shader_in | nir_var_shader_out);
+
       NIR_PASS_V(nir, nir_copy_prop);
       NIR_PASS_V(nir, nir_opt_dce);
       NIR_PASS_V(nir, nir_opt_cse);
@@ -152,7 +160,7 @@ static void si_late_optimize_16bit_samplers(struct si_screen *sscreen, nir_shade
     * based on those two.
     */
    /* TODO: The constraints can't represent the ddx constraint. */
-   /*bool has_g16 = sscreen->info.chip_class >= GFX10 && LLVM_VERSION_MAJOR >= 12;*/
+   /*bool has_g16 = sscreen->info.gfx_level >= GFX10 && LLVM_VERSION_MAJOR >= 12;*/
    bool has_g16 = false;
    nir_tex_src_type_constraints tex_constraints = {
       [nir_tex_src_comparator]   = {true, 32},
@@ -166,10 +174,15 @@ static void si_late_optimize_16bit_samplers(struct si_screen *sscreen, nir_shade
    };
    bool changed = false;
 
+   uint32_t sampler_dims = UINT32_MAX;
+   /* Skip because AMD doesn't support 16-bit types with these. */
+   sampler_dims &= ~BITFIELD_BIT(GLSL_SAMPLER_DIM_CUBE);
    NIR_PASS(changed, nir, nir_fold_16bit_sampler_conversions,
             (1 << nir_tex_src_coord) |
-            (has_g16 ? 1 << nir_tex_src_ddx : 0));
+            (has_g16 ? 1 << nir_tex_src_ddx : 0),
+            sampler_dims);
    NIR_PASS(changed, nir, nir_legalize_16bit_sampler_srcs, tex_constraints);
+   NIR_PASS(changed, nir, nir_fold_16bit_image_load_store_conversions);
 
    if (changed) {
       si_nir_opts(sscreen, nir, false);
@@ -222,6 +235,7 @@ static void si_lower_nir(struct si_screen *sscreen, struct nir_shader *nir)
    static const struct nir_lower_tex_options lower_tex_options = {
       .lower_txp = ~0u,
       .lower_txs_cube_array = true,
+      .lower_invalid_implicit_lod = true,
    };
    NIR_PASS_V(nir, nir_lower_tex, &lower_tex_options);
 
@@ -253,6 +267,12 @@ static void si_lower_nir(struct si_screen *sscreen, struct nir_shader *nir)
    NIR_PASS_V(nir, nir_opt_intrinsics);
    NIR_PASS_V(nir, nir_lower_system_values);
    NIR_PASS_V(nir, nir_lower_compute_system_values, NULL);
+
+   /* si_nir_kill_outputs and ac_nir_optimize_outputs require outputs to be scalar. */
+   if (nir->info.stage == MESA_SHADER_VERTEX ||
+       nir->info.stage == MESA_SHADER_TESS_EVAL ||
+       nir->info.stage == MESA_SHADER_GEOMETRY)
+      NIR_PASS_V(nir, nir_lower_io_to_scalar, nir_var_shader_out);
 
    if (nir->info.stage == MESA_SHADER_COMPUTE) {
       if (nir->info.cs.derivative_group == DERIVATIVE_GROUP_QUADS) {

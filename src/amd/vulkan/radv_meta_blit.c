@@ -36,10 +36,10 @@ static VkResult build_pipeline(struct radv_device *device, VkImageAspectFlagBits
                                VkPipeline *pipeline);
 
 static nir_shader *
-build_nir_vertex_shader(void)
+build_nir_vertex_shader(struct radv_device *dev)
 {
    const struct glsl_type *vec4 = glsl_vec4_type();
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_VERTEX, "meta_blit_vs");
+   nir_builder b = radv_meta_init_shader(dev, MESA_SHADER_VERTEX, "meta_blit_vs");
 
    nir_variable *pos_out = nir_variable_create(b.shader, nir_var_shader_out, vec4, "gl_Position");
    pos_out->data.location = VARYING_SLOT_POS;
@@ -64,8 +64,8 @@ build_nir_vertex_shader(void)
    /* so channel 0 is vertex_id != 2 ? src_x : src_x + w
       channel 1 is vertex id != 1 ? src_y : src_y + w */
 
-   nir_ssa_def *c0cmp = nir_ine(&b, vertex_id, nir_imm_int(&b, 2));
-   nir_ssa_def *c1cmp = nir_ine(&b, vertex_id, nir_imm_int(&b, 1));
+   nir_ssa_def *c0cmp = nir_ine_imm(&b, vertex_id, 2);
+   nir_ssa_def *c1cmp = nir_ine_imm(&b, vertex_id, 1);
 
    nir_ssa_def *comp[4];
    comp[0] = nir_bcsel(&b, c0cmp, nir_channel(&b, src_box, 0), nir_channel(&b, src_box, 2));
@@ -79,10 +79,10 @@ build_nir_vertex_shader(void)
 }
 
 static nir_shader *
-build_nir_copy_fragment_shader(enum glsl_sampler_dim tex_dim)
+build_nir_copy_fragment_shader(struct radv_device *dev, enum glsl_sampler_dim tex_dim)
 {
    const struct glsl_type *vec4 = glsl_vec4_type();
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_FRAGMENT, "meta_blit_fs.%d", tex_dim);
+   nir_builder b = radv_meta_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_blit_fs.%d", tex_dim);
 
    nir_variable *tex_pos_in = nir_variable_create(b.shader, nir_var_shader_in, vec4, "v_tex_pos");
    tex_pos_in->data.location = VARYING_SLOT_VAR0;
@@ -126,10 +126,11 @@ build_nir_copy_fragment_shader(enum glsl_sampler_dim tex_dim)
 }
 
 static nir_shader *
-build_nir_copy_fragment_shader_depth(enum glsl_sampler_dim tex_dim)
+build_nir_copy_fragment_shader_depth(struct radv_device *dev, enum glsl_sampler_dim tex_dim)
 {
    const struct glsl_type *vec4 = glsl_vec4_type();
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_FRAGMENT, "meta_blit_depth_fs.%d", tex_dim);
+   nir_builder b =
+      radv_meta_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_blit_depth_fs.%d", tex_dim);
 
    nir_variable *tex_pos_in = nir_variable_create(b.shader, nir_var_shader_in, vec4, "v_tex_pos");
    tex_pos_in->data.location = VARYING_SLOT_VAR0;
@@ -173,10 +174,11 @@ build_nir_copy_fragment_shader_depth(enum glsl_sampler_dim tex_dim)
 }
 
 static nir_shader *
-build_nir_copy_fragment_shader_stencil(enum glsl_sampler_dim tex_dim)
+build_nir_copy_fragment_shader_stencil(struct radv_device *dev, enum glsl_sampler_dim tex_dim)
 {
    const struct glsl_type *vec4 = glsl_vec4_type();
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_FRAGMENT, "meta_blit_stencil_fs.%d", tex_dim);
+   nir_builder b =
+      radv_meta_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_blit_stencil_fs.%d", tex_dim);
 
    nir_variable *tex_pos_in = nir_variable_create(b.shader, nir_var_shader_in, vec4, "v_tex_pos");
    tex_pos_in->data.location = VARYING_SLOT_VAR0;
@@ -577,7 +579,7 @@ blit_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image,
                                                    .baseArrayLayer = dst_array_slice,
                                                    .layerCount = 1},
                            },
-                           NULL);
+                           0, NULL);
       radv_image_view_init(&src_iview, cmd_buffer->device,
                            &(VkImageViewCreateInfo){
                               .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -590,7 +592,7 @@ blit_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image,
                                                    .baseArrayLayer = src_array_slice,
                                                    .layerCount = 1},
                            },
-                           NULL);
+                           0, NULL);
       meta_emit_blit(cmd_buffer, src_image, &src_iview, src_image_layout, src_offset_0,
                      src_offset_1, dst_image, &dst_iview, dst_image_layout, dst_offset_0,
                      dst_offset_1, dst_box, sampler);
@@ -669,7 +671,7 @@ build_pipeline(struct radv_device *device, VkImageAspectFlagBits aspect,
    }
 
    nir_shader *fs;
-   nir_shader *vs = build_nir_vertex_shader();
+   nir_shader *vs = build_nir_vertex_shader(device);
 
    VkPipelineRenderingCreateInfo rendering_create_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
@@ -677,16 +679,16 @@ build_pipeline(struct radv_device *device, VkImageAspectFlagBits aspect,
 
    switch (aspect) {
    case VK_IMAGE_ASPECT_COLOR_BIT:
-      fs = build_nir_copy_fragment_shader(tex_dim);
+      fs = build_nir_copy_fragment_shader(device, tex_dim);
       rendering_create_info.colorAttachmentCount = 1;
       rendering_create_info.pColorAttachmentFormats = &format;
       break;
    case VK_IMAGE_ASPECT_DEPTH_BIT:
-      fs = build_nir_copy_fragment_shader_depth(tex_dim);
+      fs = build_nir_copy_fragment_shader_depth(device, tex_dim);
       rendering_create_info.depthAttachmentFormat = format;
       break;
    case VK_IMAGE_ASPECT_STENCIL_BIT:
-      fs = build_nir_copy_fragment_shader_stencil(tex_dim);
+      fs = build_nir_copy_fragment_shader_stencil(device, tex_dim);
       rendering_create_info.stencilAttachmentFormat = format;
       break;
    default:

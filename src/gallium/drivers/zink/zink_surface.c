@@ -46,11 +46,11 @@ create_ivci(struct zink_screen *screen,
 
    switch (target) {
    case PIPE_TEXTURE_1D:
-      ivci.viewType = res->need_2D_zs ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_1D;
+      ivci.viewType = res->need_2D ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_1D;
       break;
 
    case PIPE_TEXTURE_1D_ARRAY:
-      ivci.viewType = res->need_2D_zs ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+      ivci.viewType = res->need_2D ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_1D_ARRAY;
       break;
 
    case PIPE_TEXTURE_2D:
@@ -165,7 +165,6 @@ create_surface(struct pipe_context *pctx,
    surface->base.u.tex.first_layer = templ->u.tex.first_layer;
    surface->base.u.tex.last_layer = templ->u.tex.last_layer;
    surface->obj = zink_resource(pres)->obj;
-   util_dynarray_init(&surface->framebuffer_refs, NULL);
    util_dynarray_init(&surface->desc_set_refs.refs, NULL);
 
    init_surface_info(surface, res, ivci);
@@ -291,33 +290,6 @@ zink_create_surface(struct pipe_context *pctx,
    return &csurf->base;
 }
 
-/* framebuffers are owned by their surfaces, so each time a surface that's part of a cached fb
- * is destroyed, it has to unref all the framebuffers it's attached to in order to avoid leaking
- * all the framebuffers
- *
- * surfaces are always batch-tracked, so it is impossible for a framebuffer to be destroyed
- * while it is in use
- */
-static void
-surface_clear_fb_refs(struct zink_screen *screen, struct pipe_surface *psurface)
-{
-   struct zink_surface *surface = zink_surface(psurface);
-   util_dynarray_foreach(&surface->framebuffer_refs, struct zink_framebuffer*, fb_ref) {
-      struct zink_framebuffer *fb = *fb_ref;
-      for (unsigned i = 0; i < fb->state.num_attachments; i++) {
-         if (fb->surfaces[i] == psurface) {
-            simple_mtx_lock(&screen->framebuffer_mtx);
-            fb->surfaces[i] = NULL;
-            _mesa_hash_table_remove_key(&screen->framebuffer_cache, &fb->state);
-            zink_framebuffer_reference(screen, &fb, NULL);
-            simple_mtx_unlock(&screen->framebuffer_mtx);
-            break;
-         }
-      }
-   }
-   util_dynarray_fini(&surface->framebuffer_refs);
-}
-
 void
 zink_destroy_surface(struct zink_screen *screen, struct pipe_surface *psurface)
 {
@@ -336,10 +308,7 @@ zink_destroy_surface(struct zink_screen *screen, struct pipe_surface *psurface)
       _mesa_hash_table_remove(&res->surface_cache, he);
       simple_mtx_unlock(&res->surface_mtx);
    }
-   if (!screen->info.have_KHR_imageless_framebuffer)
-      surface_clear_fb_refs(screen, psurface);
    zink_descriptor_set_refs_clear(&surface->desc_set_refs, surface);
-   util_dynarray_fini(&surface->framebuffer_refs);
    if (surface->simage_view)
       VKSCR(DestroyImageView)(screen->dev, surface->simage_view, NULL);
    if (surface->is_swapchain) {
@@ -373,15 +342,14 @@ zink_rebind_surface(struct zink_context *ctx, struct pipe_surface **psurface)
    if (surface->simage_view)
       return false;
    assert(!res->obj->dt);
-   VkImageViewCreateInfo ivci = create_ivci(screen,
-                                            zink_resource((*psurface)->texture), (*psurface), surface->base.texture->target);
+   VkImageViewCreateInfo ivci = surface->ivci;
+   ivci.image = res->obj->image;
    uint32_t hash = hash_ivci(&ivci);
 
    simple_mtx_lock(&res->surface_mtx);
    struct hash_entry *new_entry = _mesa_hash_table_search_pre_hashed(&res->surface_cache, hash, &ivci);
    if (zink_batch_usage_exists(surface->batch_uses))
       zink_batch_reference_surface(&ctx->batch, surface);
-   surface_clear_fb_refs(screen, *psurface);
    zink_descriptor_set_refs_clear(&surface->desc_set_refs, surface);
    if (new_entry) {
       /* reuse existing surface; old one will be cleaned up naturally */
@@ -426,16 +394,18 @@ zink_surface_create_null(struct zink_context *ctx, enum pipe_texture_target targ
    templ.width0 = width;
    templ.height0 = height;
    templ.depth0 = 1;
-   templ.format = PIPE_FORMAT_R8_UINT;
+   templ.format = PIPE_FORMAT_R8G8B8A8_UNORM;
    templ.target = target;
-   templ.bind = PIPE_BIND_RENDER_TARGET;
+   templ.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW;
+   if (samples < 2)
+      templ.bind |= PIPE_BIND_SHADER_IMAGE;
    templ.nr_samples = samples;
 
    pres = ctx->base.screen->resource_create(ctx->base.screen, &templ);
    if (!pres)
       return NULL;
 
-   surf_templ.format = PIPE_FORMAT_R8_UINT;
+   surf_templ.format = PIPE_FORMAT_R8G8B8A8_UNORM;
    surf_templ.nr_samples = 0;
    struct pipe_surface *psurf = ctx->base.create_surface(&ctx->base, pres, &surf_templ);
    pipe_resource_reference(&pres, NULL);
@@ -466,6 +436,8 @@ zink_surface_swapchain_update(struct zink_context *ctx, struct zink_surface *sur
       surface->old_swapchain_size = surface->swapchain_size;
       surface->swapchain_size = cdt->swapchain->num_images;
       surface->swapchain = calloc(surface->swapchain_size, sizeof(VkImageView));
+      surface->base.width = res->base.b.width0;
+      surface->base.height = res->base.b.height0;
       init_surface_info(surface, res, &surface->ivci);
    }
    if (!surface->swapchain[res->obj->dt_idx]) {

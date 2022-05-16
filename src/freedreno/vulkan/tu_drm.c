@@ -964,6 +964,7 @@ tu_queue_build_msm_gem_submit_cmds(struct tu_queue *queue,
             &dev->perfcntrs_pass_cs_entries[submit->perf_pass_index];
 
          tu_fill_msm_gem_submit(dev, &cmds[entry_idx], perf_cs_entry);
+         entry_idx++;
       }
 
       for (unsigned i = 0; i < cs->entry_count; ++i, ++entry_idx) {
@@ -975,6 +976,7 @@ tu_queue_build_msm_gem_submit_cmds(struct tu_queue *queue,
             submit->u_trace_submission_data->cmd_trace_data[j].timestamp_copy_cs;
          if (ts_cs) {
             tu_fill_msm_gem_submit(dev, &cmds[entry_idx], &ts_cs->entries[0]);
+            entry_idx++;
          }
       }
    }
@@ -1023,7 +1025,7 @@ tu_queue_submit_locked(struct tu_queue *queue, struct tu_queue_submit *submit)
       .flags = flags,
       .queueid = queue->msm_queue_id,
       .bos = (uint64_t)(uintptr_t) queue->device->bo_list,
-      .nr_bos = queue->device->bo_count,
+      .nr_bos = submit->entry_count ? queue->device->bo_count : 0,
       .cmds = (uint64_t)(uintptr_t)submit->cmds,
       .nr_cmds = submit->entry_count,
       .in_syncobjs = (uint64_t)(uintptr_t)submit->in_syncobjs,
@@ -1142,6 +1144,11 @@ tu_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
    uint32_t perf_pass_index = queue->device->perfcntrs_pass_cs ?
                               submit->perf_pass_index : ~0;
    struct tu_queue_submit submit_req;
+
+   if (unlikely(queue->device->physical_device->instance->debug_flags &
+                 TU_DEBUG_LOG_SKIP_GMEM_OPS)) {
+      tu_dbg_log_gmem_load_store_skips(queue->device);
+   }
 
    pthread_mutex_lock(&queue->device->submit_mutex);
 

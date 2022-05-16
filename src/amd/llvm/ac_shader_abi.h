@@ -27,13 +27,12 @@
 #include "ac_shader_args.h"
 #include "ac_shader_util.h"
 #include "compiler/shader_enums.h"
+#include "nir.h"
 #include <llvm-c/Core.h>
 
 #include <assert.h>
 
 #define AC_LLVM_MAX_OUTPUTS (VARYING_SLOT_VAR31 + 1)
-
-#define AC_MAX_INLINE_PUSH_CONSTS 8
 
 /* Document the shader ABI during compilation. This is what allows radeonsi and
  * radv to share a compiler backend.
@@ -52,8 +51,6 @@ struct ac_shader_abi {
    unsigned fs_input_attr_indices[MAX_VARYING];
 
    void (*export_vertex)(struct ac_shader_abi *abi);
-
-   void (*emit_outputs)(struct ac_shader_abi *abi);
 
    void (*emit_vertex)(struct ac_shader_abi *abi, unsigned stream, LLVMValueRef *addrs);
 
@@ -78,16 +75,6 @@ struct ac_shader_abi {
                              LLVMValueRef src, unsigned writemask,
                              unsigned component, unsigned location, unsigned driver_location);
 
-   LLVMValueRef (*load_patch_vertices_in)(struct ac_shader_abi *abi);
-
-   LLVMValueRef (*load_ring_tess_offchip)(struct ac_shader_abi *abi);
-
-   LLVMValueRef (*load_ring_tess_factors)(struct ac_shader_abi *abi);
-
-   LLVMValueRef (*load_ring_esgs)(struct ac_shader_abi *abi);
-
-   LLVMValueRef (*load_tess_level)(struct ac_shader_abi *abi, unsigned varying_id,
-                                   bool load_default_state);
 
    LLVMValueRef (*load_ubo)(struct ac_shader_abi *abi, LLVMValueRef index);
 
@@ -119,13 +106,9 @@ struct ac_shader_abi {
 
    LLVMValueRef (*load_sample_position)(struct ac_shader_abi *abi, LLVMValueRef sample_id);
 
-   LLVMValueRef (*load_local_group_size)(struct ac_shader_abi *abi);
-
-   LLVMValueRef (*load_sample_mask_in)(struct ac_shader_abi *abi);
-
-   LLVMValueRef (*load_base_vertex)(struct ac_shader_abi *abi, bool non_indexed_is_zero);
-
    LLVMValueRef (*emit_fbfetch)(struct ac_shader_abi *abi);
+
+   LLVMValueRef (*intrinsic_load)(struct ac_shader_abi *abi, nir_intrinsic_op op);
 
    /* Whether to clamp the shadow reference value to [0,1]on GFX8. Radeonsi currently
     * uses it due to promoting D16 to D32, but radv needs it off. */

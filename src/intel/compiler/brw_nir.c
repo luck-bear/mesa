@@ -648,6 +648,21 @@ lower_bit_size_callback(const nir_instr *instr, UNUSED void *data)
    switch (instr->type) {
    case nir_instr_type_alu: {
       nir_alu_instr *alu = nir_instr_as_alu(instr);
+      switch (alu->op) {
+      case nir_op_bit_count:
+      case nir_op_ufind_msb:
+      case nir_op_ifind_msb:
+      case nir_op_find_lsb:
+         /* These are handled specially because the destination is always
+          * 32-bit and so the bit size of the instruction is given by the
+          * source.
+          */
+         assert(alu->src[0].src.is_ssa);
+         return alu->src[0].src.ssa->bit_size == 32 ? 0 : 32;
+      default:
+         break;
+      }
+
       assert(alu->dest.dest.is_ssa);
       if (alu->dest.dest.ssa.bit_size >= 32)
          return 0;
@@ -830,6 +845,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
       .lower_txs_lod = true, /* Wa_14012320009 */
       .lower_offset_filter =
          devinfo->verx10 >= 125 ? lower_xehp_tg4_offset_filter : NULL,
+      .lower_invalid_implicit_lod = true,
    };
 
    OPT(nir_lower_tex, &tex_options);
@@ -1293,6 +1309,7 @@ brw_nir_apply_sampler_key(nir_shader *nir,
    nir_lower_tex_options tex_options = {
       .lower_txd_clamp_bindless_sampler = true,
       .lower_txd_clamp_if_sampler_index_not_lt_16 = true,
+      .lower_invalid_implicit_lod = true,
    };
 
    /* Iron Lake and prior require lowering of all rectangle textures */
@@ -1391,6 +1408,9 @@ brw_nir_apply_key(nir_shader *nir,
       .lower_subgroup_masks = true,
    };
    OPT(nir_lower_subgroups, &subgroups_options);
+
+   if (key->limit_trig_input_range)
+      OPT(brw_nir_limit_trig_input_range_workaround);
 
    if (progress)
       brw_nir_optimize(nir, compiler, is_scalar, false);

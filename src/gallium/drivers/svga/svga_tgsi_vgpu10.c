@@ -60,7 +60,7 @@
 
 
 #define INVALID_INDEX 99999
-#define MAX_INTERNAL_TEMPS 3
+#define MAX_INTERNAL_TEMPS 4
 #define MAX_SYSTEM_VALUES 4
 #define MAX_IMMEDIATE_COUNT \
         (VGPU10_MAX_IMMEDIATE_CONSTANT_BUFFER_ELEMENT_COUNT/4)
@@ -3218,7 +3218,8 @@ alloc_common_immediates(struct svga_shader_emitter_v10 *emit)
          alloc_immediate_double2(emit, -1.0, -1.0);
    }
 
-   if (emit->info.opcode_count[TGSI_OPCODE_DSQRT] > 0) {
+   if (emit->info.opcode_count[TGSI_OPCODE_DSQRT] > 0 ||
+       emit->info.opcode_count[TGSI_OPCODE_DTRUNC] > 0) {
       emit->common_immediate_pos[n++] =
          alloc_immediate_double2(emit, 0.0, 0.0);
       emit->common_immediate_pos[n++] =
@@ -5511,12 +5512,13 @@ emit_output_declarations(struct svga_shader_emitter_v10 *emit)
 
       /* Emit the declaration for the clip distance shadow copy which
        * will be used for stream output purpose and for clip distance
-       * varying variable
+       * varying variable. Note all clip distances
+       * will be written regardless of the enabled clipping planes.
        */
       emit_output_declaration(emit, VGPU10_OPCODE_DCL_OUTPUT,
                               emit->clip_dist_so_index,
                               VGPU10_NAME_UNDEFINED,
-                              emit->output_usage_mask[emit->clip_dist_out_index],
+                              VGPU10_OPERAND_4_COMPONENT_MASK_ALL,
                               TRUE,
                               SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED);
 
@@ -5525,7 +5527,7 @@ emit_output_declarations(struct svga_shader_emitter_v10 *emit)
          emit_output_declaration(emit, VGPU10_OPCODE_DCL_OUTPUT,
                                  emit->clip_dist_so_index + 1,
                                  VGPU10_NAME_UNDEFINED,
-                                 emit->output_usage_mask[emit->clip_dist_out_index+1],
+                                 VGPU10_OPERAND_4_COMPONENT_MASK_ALL,
                                  TRUE,
                                  SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED);
       }
@@ -9235,7 +9237,21 @@ opcode_has_dbl_src(unsigned opcode)
    case TGSI_OPCODE_D2I:
    case TGSI_OPCODE_D2U:
    case TGSI_OPCODE_DFMA:
-      // XXX more TBD
+   case TGSI_OPCODE_DSLT:
+   case TGSI_OPCODE_DSGE:
+   case TGSI_OPCODE_DSEQ:
+   case TGSI_OPCODE_DSNE:
+   case TGSI_OPCODE_DRCP:
+   case TGSI_OPCODE_DSQRT:
+   case TGSI_OPCODE_DMAD:
+   case TGSI_OPCODE_DLDEXP:
+   case TGSI_OPCODE_DFRACEXP:
+   case TGSI_OPCODE_DRSQ:
+   case TGSI_OPCODE_DTRUNC:
+   case TGSI_OPCODE_DCEIL:
+   case TGSI_OPCODE_DFLR:
+   case TGSI_OPCODE_DROUND:
+   case TGSI_OPCODE_DSSG:
       return true;
    default:
       return false;
@@ -9245,22 +9261,35 @@ opcode_has_dbl_src(unsigned opcode)
 
 /**
  * Check that the swizzle for reading from a double-precision register
- * is valid.
+ * is valid. If not valid, move the source to a temporary register first.
  */
-static void
-check_double_src_swizzle(const struct tgsi_full_src_register *reg)
+static struct tgsi_full_src_register
+check_double_src(struct svga_shader_emitter_v10 *emit,
+                 const struct tgsi_full_src_register *reg)
 {
-   assert((reg->Register.SwizzleX == PIPE_SWIZZLE_X &&
-           reg->Register.SwizzleY == PIPE_SWIZZLE_Y) ||
-          (reg->Register.SwizzleX == PIPE_SWIZZLE_Z &&
-           reg->Register.SwizzleY == PIPE_SWIZZLE_W));
+   struct tgsi_full_src_register src;
 
-   assert((reg->Register.SwizzleZ == PIPE_SWIZZLE_X &&
-           reg->Register.SwizzleW == PIPE_SWIZZLE_Y) ||
-          (reg->Register.SwizzleZ == PIPE_SWIZZLE_Z &&
-           reg->Register.SwizzleW == PIPE_SWIZZLE_W));
+   if (((reg->Register.SwizzleX == PIPE_SWIZZLE_X &&
+         reg->Register.SwizzleY == PIPE_SWIZZLE_Y) ||
+        (reg->Register.SwizzleX == PIPE_SWIZZLE_Z &&
+         reg->Register.SwizzleY == PIPE_SWIZZLE_W)) &&
+       ((reg->Register.SwizzleZ == PIPE_SWIZZLE_X &&
+         reg->Register.SwizzleW == PIPE_SWIZZLE_Y) ||
+        (reg->Register.SwizzleZ == PIPE_SWIZZLE_Z &&
+         reg->Register.SwizzleW == PIPE_SWIZZLE_W))) {
+      src = *reg;
+   } else {
+      /* move the src to a temporary to fix the swizzle */
+      unsigned tmp = get_temp_index(emit);
+      struct tgsi_full_src_register tmp_src = make_src_temp_reg(tmp);
+      struct tgsi_full_dst_register tmp_dst = make_dst_temp_reg(tmp);
+      emit_instruction_op1(emit, VGPU10_OPCODE_MOV, &tmp_dst, reg);
+      src = tmp_src;
+
+      /* The temporary index will be released in the caller */
+   }
+   return src;
 }
-
 
 /**
  * Check that the writemask for a double-precision instruction is valid.
@@ -9311,14 +9340,16 @@ emit_dabs(struct svga_shader_emitter_v10 *emit,
           const struct tgsi_full_instruction *inst)
 {
    assert(emit->version >= 50);
-   check_double_src_swizzle(&inst->Src[0]);
+
+   struct tgsi_full_src_register src = check_double_src(emit, &inst->Src[0]);
    check_double_dst_writemask(inst);
 
-   struct tgsi_full_src_register abs_src = absolute_src(&inst->Src[0]);
+   struct tgsi_full_src_register abs_src = absolute_src(&src);
 
    /* DMOV dst, |src| */
    emit_instruction_op1(emit, VGPU10_OPCODE_DMOV, &inst->Dst[0], &abs_src);
 
+   free_temp_indexes(emit);
    return TRUE;
 }
 
@@ -9331,14 +9362,15 @@ emit_dneg(struct svga_shader_emitter_v10 *emit,
           const struct tgsi_full_instruction *inst)
 {
    assert(emit->version >= 50);
-   check_double_src_swizzle(&inst->Src[0]);
+   struct tgsi_full_src_register src = check_double_src(emit, &inst->Src[0]);
    check_double_dst_writemask(inst);
 
-   struct tgsi_full_src_register neg_src = negate_src(&inst->Src[0]);
+   struct tgsi_full_src_register neg_src = negate_src(&src);
 
    /* DMOV dst, -src */
    emit_instruction_op1(emit, VGPU10_OPCODE_DMOV, &inst->Dst[0], &neg_src);
 
+   free_temp_indexes(emit);
    return TRUE;
 }
 
@@ -9351,9 +9383,9 @@ emit_dmad(struct svga_shader_emitter_v10 *emit,
           const struct tgsi_full_instruction *inst)
 {
    assert(emit->version >= 50);
-   check_double_src_swizzle(&inst->Src[0]);
-   check_double_src_swizzle(&inst->Src[1]);
-   check_double_src_swizzle(&inst->Src[2]);
+   struct tgsi_full_src_register src0 = check_double_src(emit, &inst->Src[0]);
+   struct tgsi_full_src_register src1 = check_double_src(emit, &inst->Src[1]);
+   struct tgsi_full_src_register src2 = check_double_src(emit, &inst->Src[2]);
    check_double_dst_writemask(inst);
 
    unsigned tmp = get_temp_index(emit);
@@ -9362,12 +9394,12 @@ emit_dmad(struct svga_shader_emitter_v10 *emit,
 
    /* DMUL tmp, src[0], src[1] */
    emit_instruction_opn(emit, VGPU10_OPCODE_DMUL,
-                        &tmp_dst, &inst->Src[0], &inst->Src[1], NULL,
+                        &tmp_dst, &src0, &src1, NULL,
                         FALSE, inst->Instruction.Precise);
 
    /* DADD dst, tmp, src[2] */
    emit_instruction_opn(emit, VGPU10_OPCODE_DADD,
-                        &inst->Dst[0], &tmp_src, &inst->Src[2], NULL,
+                        &inst->Dst[0], &tmp_src, &src2, NULL,
                         inst->Instruction.Saturate, inst->Instruction.Precise);
    free_temp_indexes(emit);
 
@@ -9386,19 +9418,19 @@ emit_drsq(struct svga_shader_emitter_v10 *emit,
    assert(emit->version >= 50);
 
    VGPU10OpcodeToken0 token0;
+   struct tgsi_full_src_register dsrc = check_double_src(emit, src);
+
    begin_emit_instruction(emit);
 
    token0.value = 0;
    token0.opcodeType = VGPU10_OPCODE_VMWARE;
    token0.vmwareOpcodeType = VGPU10_VMWARE_OPCODE_DRSQ;
    emit_dword(emit, token0.value);
-
    emit_dst_register(emit, dst);
-
-   check_double_src_swizzle(src);
-   emit_src_register(emit, src);
-
+   emit_src_register(emit, &dsrc);
    end_emit_instruction(emit);
+
+   free_temp_indexes(emit);
 
    return TRUE;
 }
@@ -9415,7 +9447,7 @@ emit_dsqrt(struct svga_shader_emitter_v10 *emit,
 {
    assert(emit->version >= 50);
 
-   check_double_src_swizzle(&inst->Src[0]);
+   struct tgsi_full_src_register src = check_double_src(emit, &inst->Src[0]);
 
    /* temporary register to hold the source */
    unsigned tmp = get_temp_index(emit);
@@ -9450,9 +9482,9 @@ emit_dsqrt(struct svga_shader_emitter_v10 *emit,
                make_immediate_reg_double(emit, 1.0);
 
    emit_instruction_op2(emit, VGPU10_OPCODE_DEQ, &tmp_cond_dst_xy,
-                        &zero, &inst->Src[0]);
+                        &zero, &src);
    emit_instruction_op3(emit, VGPU10_OPCODE_DMOVC, &tmp_dst,
-                        &tmp_cond_src_xy, &one, &inst->Src[0]);
+                        &tmp_cond_src_xy, &one, &src);
 
    struct tgsi_full_dst_register tmp_rsq_dst = make_dst_temp_reg(tmp);
    struct tgsi_full_src_register tmp_rsq_src = make_src_temp_reg(tmp);
@@ -9462,10 +9494,98 @@ emit_dsqrt(struct svga_shader_emitter_v10 *emit,
 
    /* DMUL dst, tmp_rsq, src[0] */
    emit_instruction_op2(emit, VGPU10_OPCODE_DMUL, &inst->Dst[0],
-                        &tmp_rsq_src, &inst->Src[0]);
+                        &tmp_rsq_src, &src);
 
    free_temp_indexes(emit);
 
+   return TRUE;
+}
+
+
+/**
+ * glsl-nir path does not lower DTRUNC, so we need to
+ * add the translation here.
+ *
+ * frac = DFRAC(src)
+ * tmp = src - frac
+ * dst = src >= 0 ? tmp : (tmp + (frac==0 ? 0 : 1))
+ */
+static boolean
+emit_dtrunc(struct svga_shader_emitter_v10 *emit,
+            const struct tgsi_full_instruction *inst)
+{
+   assert(emit->version >= 50);
+
+   struct tgsi_full_src_register src = check_double_src(emit, &inst->Src[0]);
+
+   /* frac = DFRAC(src) */
+   unsigned frac_index = get_temp_index(emit);
+   struct tgsi_full_dst_register frac_dst = make_dst_temp_reg(frac_index);
+   struct tgsi_full_src_register frac_src = make_src_temp_reg(frac_index);
+
+   VGPU10OpcodeToken0 token0;
+   begin_emit_instruction(emit);
+   token0.value = 0;
+   token0.opcodeType = VGPU10_OPCODE_VMWARE;
+   token0.vmwareOpcodeType = VGPU10_VMWARE_OPCODE_DFRC;
+   emit_dword(emit, token0.value);
+   emit_dst_register(emit, &frac_dst);
+   emit_src_register(emit, &src);
+   end_emit_instruction(emit);
+
+   /* tmp = src - frac */
+   unsigned tmp_index = get_temp_index(emit);
+   struct tgsi_full_dst_register tmp_dst = make_dst_temp_reg(tmp_index);
+   struct tgsi_full_src_register tmp_src = make_src_temp_reg(tmp_index);
+   struct tgsi_full_src_register negate_frac_src = negate_src(&frac_src);
+   emit_instruction_opn(emit, VGPU10_OPCODE_DADD,
+                        &tmp_dst, &src, &negate_frac_src, NULL,
+                        inst->Instruction.Saturate, inst->Instruction.Precise);
+
+   /* cond = frac==0 */
+   unsigned cond_index = get_temp_index(emit);
+   struct tgsi_full_dst_register cond_dst = make_dst_temp_reg(cond_index);
+   struct tgsi_full_src_register cond_src = make_src_temp_reg(cond_index);
+   struct tgsi_full_src_register zero =
+               make_immediate_reg_double(emit, 0);
+
+   /* Only use one or two components for double opcode */
+   cond_dst = writemask_dst(&cond_dst, TGSI_WRITEMASK_X | TGSI_WRITEMASK_Y);
+
+   emit_instruction_opn(emit, VGPU10_OPCODE_DEQ,
+                        &cond_dst, &frac_src, &zero, NULL,
+                        inst->Instruction.Saturate, inst->Instruction.Precise);
+
+   /* tmp2 = cond ? 0 : 1 */
+   unsigned tmp2_index = get_temp_index(emit);
+   struct tgsi_full_dst_register tmp2_dst = make_dst_temp_reg(tmp2_index);
+   struct tgsi_full_src_register tmp2_src = make_src_temp_reg(tmp2_index);
+   struct tgsi_full_src_register cond_src_xy =
+      swizzle_src(&cond_src, PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y,
+		             PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y);
+   struct tgsi_full_src_register one =
+               make_immediate_reg_double(emit, 1.0);
+
+   emit_instruction_opn(emit, VGPU10_OPCODE_DMOVC,
+                        &tmp2_dst, &cond_src_xy, &zero, &one,
+                        inst->Instruction.Saturate, inst->Instruction.Precise);
+
+   /* tmp2 = tmp + tmp2 */
+   emit_instruction_opn(emit, VGPU10_OPCODE_DADD,
+                        &tmp2_dst, &tmp_src, &tmp2_src, NULL,
+                        inst->Instruction.Saturate, inst->Instruction.Precise);
+
+   /* cond = src>=0 */
+   emit_instruction_opn(emit, VGPU10_OPCODE_DGE,
+                        &cond_dst, &src, &zero, NULL,
+                        inst->Instruction.Saturate, inst->Instruction.Precise);
+
+   /* dst = cond ? tmp : tmp2 */
+   emit_instruction_opn(emit, VGPU10_OPCODE_DMOVC,
+                        &inst->Dst[0], &cond_src_xy, &tmp_src, &tmp2_src,
+                        inst->Instruction.Saturate, inst->Instruction.Precise);
+
+   free_temp_indexes(emit);
    return TRUE;
 }
 
@@ -9519,11 +9639,20 @@ emit_simple(struct svga_shader_emitter_v10 *emit,
    const bool dbl_src = opcode_has_dbl_src(inst->Instruction.Opcode);
    unsigned i;
 
+   struct tgsi_full_src_register src[3];
+
    if (inst->Instruction.Opcode == TGSI_OPCODE_BGNLOOP) {
       emit->current_loop_depth++;
    }
    else if (inst->Instruction.Opcode == TGSI_OPCODE_ENDLOOP) {
       emit->current_loop_depth--;
+   }
+
+   for (i = 0; i < op->num_src; i++) {
+      if (dbl_src)
+         src[i] = check_double_src(emit, &inst->Src[i]);
+      else
+         src[i] = inst->Src[i];
    }
 
    begin_emit_instruction(emit);
@@ -9537,13 +9666,11 @@ emit_simple(struct svga_shader_emitter_v10 *emit,
       emit_dst_register(emit, &inst->Dst[i]);
    }
    for (i = 0; i < op->num_src; i++) {
-      if (dbl_src) {
-         check_double_src_swizzle(&inst->Src[i]);
-      }
-      emit_src_register(emit, &inst->Src[i]);
+      emit_src_register(emit, &src[i]);
    }
    end_emit_instruction(emit);
 
+   free_temp_indexes(emit);
    return TRUE;
 }
 
@@ -9834,8 +9961,15 @@ emit_vmware(struct svga_shader_emitter_v10 *emit,
    const struct tgsi_opcode_info *op = tgsi_get_opcode_info(opcode);
    const bool dbl_dst = opcode_has_dbl_dst(inst->Instruction.Opcode);
    const bool dbl_src = opcode_has_dbl_src(inst->Instruction.Opcode);
-
    unsigned i;
+   struct tgsi_full_src_register src[3];
+
+   for (i = 0; i < op->num_src; i++) {
+      if (dbl_src)
+         src[i] = check_double_src(emit, &inst->Src[i]);
+      else
+         src[i] = inst->Src[i];
+   }
 
    begin_emit_instruction(emit);
 
@@ -9860,13 +9994,11 @@ emit_vmware(struct svga_shader_emitter_v10 *emit,
    }
 
    for (i = 0; i < op->num_src; i++) {
-      if (dbl_src) {
-         check_double_src_swizzle(&inst->Src[i]);
-      }
-      emit_src_register(emit, &inst->Src[i]);
+      emit_src_register(emit, &src[i]);
    }
    end_emit_instruction(emit);
 
+   free_temp_indexes(emit);
    return TRUE;
 }
 
@@ -10960,15 +11092,17 @@ emit_instruction(struct svga_shader_emitter_v10 *emit,
    case TGSI_OPCODE_DFMA:
       return emit_simple(emit, inst);
 
+   case TGSI_OPCODE_DTRUNC:
+      return emit_dtrunc(emit, inst);
+
    /* The following opcodes should never be seen here.  We return zero
     * for all the PIPE_CAP_TGSI_DROUND_SUPPORTED, DFRACEXP_DLDEXP_SUPPORTED,
-    * FMA_SUPPORTED, LDEXP_SUPPORTED queries.
+    * LDEXP_SUPPORTED queries.
     */
    case TGSI_OPCODE_LDEXP:
    case TGSI_OPCODE_DSSG:
    case TGSI_OPCODE_DFRACEXP:
    case TGSI_OPCODE_DLDEXP:
-   case TGSI_OPCODE_DTRUNC:
    case TGSI_OPCODE_DCEIL:
    case TGSI_OPCODE_DFLR:
       debug_printf("Unexpected TGSI opcode %s.  "
@@ -12603,8 +12737,8 @@ compute_input_mapping(struct svga_context *svga,
    }
 
    if (prevShader != NULL) {
-      svga_link_shaders(&prevShader->info, &emit->info, &emit->linkage);
-      emit->prevShaderInfo = &prevShader->info;
+      svga_link_shaders(&prevShader->tgsi_info, &emit->info, &emit->linkage);
+      emit->prevShaderInfo = &prevShader->tgsi_info;
    } 
    else {
       /**
@@ -12844,7 +12978,7 @@ svga_tgsi_vgpu10_translate(struct svga_context *svga,
    if (tokens != shader->tokens) {
       tgsi_scan_shader(tokens, &emit->info);
    } else {
-      emit->info = shader->info;
+      emit->info = shader->tgsi_info;
    }
 
    emit->num_outputs = emit->info.num_outputs;

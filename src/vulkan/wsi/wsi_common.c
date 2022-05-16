@@ -38,6 +38,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 
 VkResult
 wsi_device_init(struct wsi_device *wsi,
@@ -362,22 +363,26 @@ wsi_configure_image(const struct wsi_swapchain *chain,
                     struct wsi_image_info *info)
 {
    memset(info, 0, sizeof(*info));
-   uint32_t *queue_family_indices;
+   uint32_t queue_family_count = 1;
 
-   if (pCreateInfo->imageSharingMode == VK_SHARING_MODE_CONCURRENT) {
-      queue_family_indices =
-         vk_alloc(&chain->alloc,
-                  sizeof(*queue_family_indices) *
-                  pCreateInfo->queueFamilyIndexCount,
-                  8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-      if (!queue_family_indices)
-         goto err_oom;
+   if (pCreateInfo->imageSharingMode == VK_SHARING_MODE_CONCURRENT)
+      queue_family_count = pCreateInfo->queueFamilyIndexCount;
 
+   /*
+    * TODO: there should be no reason to allocate this, but
+    * 15331 shows that games crashed without doing this.
+    */
+   uint32_t *queue_family_indices =
+      vk_alloc(&chain->alloc,
+               sizeof(*queue_family_indices) *
+               queue_family_count,
+               8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (!queue_family_indices)
+      goto err_oom;
+
+   if (pCreateInfo->imageSharingMode == VK_SHARING_MODE_CONCURRENT)
       for (uint32_t i = 0; i < pCreateInfo->queueFamilyIndexCount; i++)
          queue_family_indices[i] = pCreateInfo->pQueueFamilyIndices[i];
-   } else {
-      queue_family_indices = NULL;
-   }
 
    info->create = (VkImageCreateInfo) {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -395,7 +400,7 @@ wsi_configure_image(const struct wsi_swapchain *chain,
       .tiling = VK_IMAGE_TILING_OPTIMAL,
       .usage = pCreateInfo->imageUsage,
       .sharingMode = pCreateInfo->imageSharingMode,
-      .queueFamilyIndexCount = pCreateInfo->queueFamilyIndexCount,
+      .queueFamilyIndexCount = queue_family_count,
       .pQueueFamilyIndices = queue_family_indices,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
    };
@@ -472,8 +477,7 @@ wsi_create_image(const struct wsi_swapchain *chain,
    VkResult result;
 
    memset(image, 0, sizeof(*image));
-   for (int i = 0; i < ARRAY_SIZE(image->fds); i++)
-      image->fds[i] = -1;
+   image->dma_buf_fd = -1;
 
    result = wsi->CreateImage(chain->device, &info->create,
                              &chain->alloc, &image->image);
@@ -507,6 +511,9 @@ wsi_destroy_image(const struct wsi_swapchain *chain,
                   struct wsi_image *image)
 {
    const struct wsi_device *wsi = chain->wsi;
+
+   if (image->dma_buf_fd >= 0)
+      close(image->dma_buf_fd);
 
    if (image->buffer.blit_cmd_buffers) {
       for (uint32_t i = 0; i < wsi->queue_family_count; i++) {
@@ -810,6 +817,40 @@ wsi_AcquireNextImageKHR(VkDevice _device,
                                                       pImageIndex);
 }
 
+static VkResult
+wsi_signal_semaphore_for_image(struct vk_device *device,
+                               const struct wsi_swapchain *chain,
+                               const struct wsi_image *image,
+                               VkSemaphore _semaphore)
+{
+   VK_FROM_HANDLE(vk_semaphore, semaphore, _semaphore);
+
+   if (!chain->wsi->signal_fence_with_memory)
+      return VK_SUCCESS;
+
+   vk_semaphore_reset_temporary(device, semaphore);
+   return device->create_sync_for_memory(device, image->memory,
+                                         false /* signal_memory */,
+                                         &semaphore->temporary);
+}
+
+static VkResult
+wsi_signal_fence_for_image(struct vk_device *device,
+                           const struct wsi_swapchain *chain,
+                           const struct wsi_image *image,
+                           VkFence _fence)
+{
+   VK_FROM_HANDLE(vk_fence, fence, _fence);
+
+   if (!chain->wsi->signal_fence_with_memory)
+      return VK_SUCCESS;
+
+   vk_fence_reset_temporary(device, fence);
+   return device->create_sync_for_memory(device, image->memory,
+                                         false /* signal_memory */,
+                                         &fence->temporary);
+}
+
 VkResult
 wsi_common_acquire_next_image2(const struct wsi_device *wsi,
                                VkDevice _device,
@@ -829,34 +870,23 @@ wsi_common_acquire_next_image2(const struct wsi_device *wsi,
       wsi->set_memory_ownership(swapchain->device, mem, true);
    }
 
-   if (pAcquireInfo->semaphore != VK_NULL_HANDLE &&
-       wsi->signal_semaphore_with_memory) {
-      VK_FROM_HANDLE(vk_semaphore, semaphore, pAcquireInfo->semaphore);
-      struct wsi_image *image =
-         swapchain->get_wsi_image(swapchain, *pImageIndex);
+   struct wsi_image *image =
+      swapchain->get_wsi_image(swapchain, *pImageIndex);
 
-      vk_semaphore_reset_temporary(device, semaphore);
-      VkResult lresult =
-         device->create_sync_for_memory(device, image->memory,
-                                        false /* signal_memory */,
-                                        &semaphore->temporary);
-      if (lresult != VK_SUCCESS)
-         return lresult;
+   if (pAcquireInfo->semaphore != VK_NULL_HANDLE) {
+      VkResult signal_result =
+         wsi_signal_semaphore_for_image(device, swapchain, image,
+                                        pAcquireInfo->semaphore);
+      if (signal_result != VK_SUCCESS)
+         return signal_result;
    }
 
-   if (pAcquireInfo->fence != VK_NULL_HANDLE &&
-       wsi->signal_fence_with_memory) {
-      VK_FROM_HANDLE(vk_fence, fence, pAcquireInfo->fence);
-      struct wsi_image *image =
-         swapchain->get_wsi_image(swapchain, *pImageIndex);
-
-      vk_fence_reset_temporary(device, fence);
-      VkResult lresult =
-         device->create_sync_for_memory(device, image->memory,
-                                        false /* signal_memory */,
-                                        &fence->temporary);
-      if (lresult != VK_SUCCESS)
-         return lresult;
+   if (pAcquireInfo->fence != VK_NULL_HANDLE) {
+      VkResult signal_result =
+         wsi_signal_fence_for_image(device, swapchain, image,
+                                    pAcquireInfo->fence);
+      if (signal_result != VK_SUCCESS)
+         return signal_result;
    }
 
    return result;
@@ -894,7 +924,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          const VkFenceCreateInfo fence_info = {
             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
             .pNext = NULL,
-            .flags = 0,
+            .flags = VK_FENCE_CREATE_SIGNALED_BIT,
          };
          result = wsi->CreateFence(device, &fence_info,
                                    &swapchain->alloc,
@@ -918,11 +948,6 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          result =
             wsi->WaitForFences(device, 1, &swapchain->fences[image_index],
                                true, ~0ull);
-         if (result != VK_SUCCESS)
-            goto fail_present;
-
-         result =
-            wsi->ResetFences(device, 1, &swapchain->fences[image_index]);
          if (result != VK_SUCCESS)
             goto fail_present;
       }
@@ -960,10 +985,14 @@ wsi_common_queue_present(const struct wsi_device *wsi,
             goto fail_present;
          }
          for (uint32_t s = 0; s < pPresentInfo->waitSemaphoreCount; s++)
-            stage_flags[s] = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+            stage_flags[s] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 
          submit_info.pWaitDstStageMask = stage_flags;
       }
+
+      result = wsi->ResetFences(device, 1, &swapchain->fences[image_index]);
+      if (result != VK_SUCCESS)
+         goto fail_present;
 
       VkFence fence = swapchain->fences[image_index];
       if (swapchain->use_buffer_blit) {

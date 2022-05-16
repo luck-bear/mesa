@@ -298,7 +298,7 @@ anv_batch_emit_dwords(struct anv_batch *batch, int num_dwords)
 struct anv_address
 anv_batch_address(struct anv_batch *batch, void *batch_location)
 {
-   assert(batch->start < batch_location);
+   assert(batch->start <= batch_location);
 
    /* Allow a jump at the current location of the batch. */
    assert(batch->next >= batch_location);
@@ -1911,7 +1911,7 @@ setup_execbuf_for_cmd_buffers(struct anv_execbuf *execbuf,
       anv_cmd_buffer_process_relocs(cmd_buffers[0], &cmd_buffers[0]->surface_relocs);
    }
 
-   if (!device->info.has_llc) {
+   if (device->physical->memory.need_clflush) {
       __builtin_ia32_mfence();
       for (uint32_t i = 0; i < num_cmd_buffers; i++) {
          u_vector_foreach(bbo, &cmd_buffers[i]->seen_bbos) {
@@ -1998,11 +1998,8 @@ setup_utrace_execbuf(struct anv_execbuf *execbuf, struct anv_queue *queue,
       flush->batch_bo->exec_obj_index = last_idx;
    }
 
-   if (!device->info.has_llc) {
-      __builtin_ia32_mfence();
-      for (uint32_t i = 0; i < flush->batch_bo->size; i += CACHELINE_SIZE)
-         __builtin_ia32_clflush(flush->batch_bo->map);
-   }
+   if (device->physical->memory.need_clflush)
+      intel_flush_range(flush->batch_bo->map, flush->batch_bo->size);
 
    execbuf->execbuf = (struct drm_i915_gem_execbuffer2) {
       .buffers_ptr = (uintptr_t) execbuf->objects,
@@ -2143,6 +2140,15 @@ anv_queue_exec_locked(struct anv_queue *queue,
          goto error;
    }
 
+   if (queue->sync) {
+      result = anv_execbuf_add_sync(device, &execbuf,
+                                    queue->sync,
+                                    true /* is_signal */,
+                                    0 /* signal_value */);
+      if (result != VK_SUCCESS)
+         goto error;
+   }
+
    if (cmd_buffer_count) {
       result = setup_execbuf_for_cmd_buffers(&execbuf, queue,
                                              cmd_buffers,
@@ -2163,8 +2169,9 @@ anv_queue_exec_locked(struct anv_queue *queue,
       for (uint32_t i = 0; i < execbuf.bo_count; i++) {
          const struct anv_bo *bo = execbuf.bos[i];
 
-         fprintf(stderr, "   BO: addr=0x%016"PRIx64" size=%010"PRIx64" handle=%05u name=%s\n",
-                 bo->offset, bo->size, bo->gem_handle, bo->name);
+         fprintf(stderr, "   BO: addr=0x%016"PRIx64"-0x%016"PRIx64" size=0x%010"PRIx64
+                 " handle=%05u name=%s\n",
+                 bo->offset, bo->offset + bo->size - 1, bo->size, bo->gem_handle, bo->name);
       }
    }
 
@@ -2256,6 +2263,15 @@ anv_queue_exec_locked(struct anv_queue *queue,
       anv_gem_execbuffer(queue->device, &execbuf.execbuf);
    if (ret)
       result = vk_queue_set_lost(&queue->vk, "execbuf2 failed: %m");
+
+   if (queue->sync) {
+      VkResult result = vk_sync_wait(&device->vk,
+                                     queue->sync, 0,
+                                     VK_SYNC_WAIT_COMPLETE,
+                                     UINT64_MAX);
+      if (result != VK_SUCCESS)
+         result = vk_queue_set_lost(&queue->vk, "sync wait failed");
+   }
 
    struct drm_i915_gem_exec_object2 *objects = execbuf.objects;
    for (uint32_t k = 0; k < execbuf.bo_count; k++) {
@@ -2419,7 +2435,7 @@ anv_queue_submit_simple_batch(struct anv_queue *queue,
       return result;
 
    memcpy(batch_bo->map, batch->start, batch_size);
-   if (!device->info.has_llc)
+   if (device->physical->memory.need_clflush)
       intel_flush_range(batch_bo->map, batch_size);
 
    struct anv_execbuf execbuf;

@@ -115,16 +115,6 @@ panfrost_query_raw(
 static unsigned
 panfrost_query_gpu_version(int fd)
 {
-#ifndef NDEBUG
-        /* In debug builds, allow overriding the GPU ID, for example to run
-         * Bifrost shader-db on a Midgard machine. This is a bit less heavy
-         * handed than setting up the entirety of drm-shim */
-        char *override_version = getenv("PAN_GPU_ID");
-
-        if (override_version)
-                return strtol(override_version, NULL, 16);
-#endif
-
         return panfrost_query_raw(fd, DRM_PANFROST_PARAM_GPU_PROD_ID, true, 0);
 }
 
@@ -292,7 +282,7 @@ panfrost_open_device(void *memctx, int fd, struct panfrost_device *dev)
          * active for a single job chain at once, so a single heap can be
          * shared across batches/contextes */
 
-        dev->tiler_heap = panfrost_bo_create(dev, 64 * 1024 * 1024,
+        dev->tiler_heap = panfrost_bo_create(dev, 128 * 1024 * 1024,
                         PAN_BO_INVISIBLE | PAN_BO_GROWABLE, "Tiler heap");
 
         pthread_mutex_init(&dev->submit_lock, NULL);

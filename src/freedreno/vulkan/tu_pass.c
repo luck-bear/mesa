@@ -74,8 +74,8 @@ dep_invalid_for_gmem(const VkSubpassDependency2 *dep)
       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
    return
-      (dep->srcStageMask & ~framebuffer_space_stages) ||
-      (dep->dstStageMask & ~framebuffer_space_stages) ||
+      (dep->srcStageMask & ~(framebuffer_space_stages | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT)) ||
+      (dep->dstStageMask & ~(framebuffer_space_stages | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT)) ||
       !(dep->dependencyFlags & VK_DEPENDENCY_BY_REGION_BIT);
 }
 
@@ -96,8 +96,10 @@ tu_render_pass_add_subpass_dep(struct tu_render_pass *pass,
    if (src == dst)
       return;
 
-   if (dep_invalid_for_gmem(dep))
+   if (dep_invalid_for_gmem(dep)) {
+      perf_debug((struct tu_device *)pass->base.device, "Disabling gmem rendering due to invalid subpass dependency");
       pass->gmem_pixels = 0;
+   }
 
    struct tu_subpass_barrier *dst_barrier;
    if (dst == VK_SUBPASS_EXTERNAL) {
@@ -800,6 +802,12 @@ tu_CreateRenderPass2(VkDevice _device,
          for (uint32_t j = 0; j < desc->colorAttachmentCount; j++) {
             subpass->resolve_attachments[j].attachment =
                   desc->pResolveAttachments[j].attachment;
+
+            uint32_t src_a = desc->pColorAttachments[j].attachment;
+            if (src_a != VK_ATTACHMENT_UNUSED) {
+               pass->attachments[src_a].will_be_resolved =
+                  desc->pResolveAttachments[j].attachment != VK_ATTACHMENT_UNUSED;
+            }
          }
       }
 
@@ -808,6 +816,11 @@ tu_CreateRenderPass2(VkDevice _device,
          subpass->resolve_count++;
          uint32_t a = ds_resolve->pDepthStencilResolveAttachment->attachment;
          subpass->resolve_attachments[subpass->resolve_count - 1].attachment = a;
+
+         uint32_t src_a = desc->pDepthStencilAttachment->attachment;
+         if (src_a != VK_ATTACHMENT_UNUSED) {
+            pass->attachments[src_a].will_be_resolved = a != VK_ATTACHMENT_UNUSED;
+         }
       }
 
       uint32_t a = desc->pDepthStencilAttachment ?

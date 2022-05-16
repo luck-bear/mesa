@@ -95,7 +95,6 @@ struct radv_pipeline_layout {
    struct vk_object_base base;
    struct {
       struct radv_descriptor_set_layout *layout;
-      uint32_t size;
       uint32_t dynamic_offset_start;
    } set[MAX_SETS];
 
@@ -103,6 +102,8 @@ struct radv_pipeline_layout {
    uint32_t push_constant_size;
    uint32_t dynamic_offset_count;
    uint16_t dynamic_shader_stages;
+
+   bool independent_sets;
 
    unsigned char sha1[20];
 };
@@ -135,4 +136,14 @@ radv_immutable_ycbcr_samplers(const struct radv_descriptor_set_layout *set, unsi
    return (const struct radv_sampler_ycbcr_conversion_state *)((const char *)set +
                                                          offsets[binding_index]);
 }
+
+struct radv_device;
+
+void radv_pipeline_layout_init(struct radv_device *device, struct radv_pipeline_layout *layout,
+                               bool independent_sets);
+void radv_pipeline_layout_add_set(struct radv_pipeline_layout *layout, uint32_t set_idx,
+                                  struct radv_descriptor_set_layout *set_layout);
+void radv_pipeline_layout_hash(struct radv_pipeline_layout *layout);
+void radv_pipeline_layout_finish(struct radv_device *device, struct radv_pipeline_layout *layout);
+
 #endif /* RADV_DESCRIPTOR_SET_H */

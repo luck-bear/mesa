@@ -163,7 +163,9 @@ unsigned
 pan_lookup_pushed_ubo(struct panfrost_ubo_push *push, unsigned ubo, unsigned offs);
 
 struct hash_table_u64 *
-panfrost_init_sysvals(struct panfrost_sysvals *sysvals, void *memctx);
+panfrost_init_sysvals(struct panfrost_sysvals *sysvals,
+                      struct panfrost_sysvals *fixed_sysvals,
+                      void *memctx);
 
 unsigned
 pan_lookup_sysval(struct hash_table_u64 *sysval_to_id,
@@ -181,7 +183,8 @@ struct panfrost_compile_inputs {
                 unsigned nr_samples;
                 uint64_t bifrost_blend_desc;
         } blend;
-        unsigned sysval_ubo;
+        int fixed_sysval_ubo;
+        struct panfrost_sysvals *fixed_sysval_layout;
         bool shaderdb;
         bool no_idvs;
         bool no_ubo_to_push;
@@ -189,6 +192,16 @@ struct panfrost_compile_inputs {
         enum pipe_format rt_formats[8];
         uint8_t raw_fmt_mask;
         unsigned nr_cbufs;
+
+        /* Used on Valhall.
+         *
+         * Bit mask of special desktop-only varyings (e.g VARYING_SLOT_TEX0)
+         * written by the previous stage (fragment shader) or written by this
+         * stage (vertex shader). Bits are slots from gl_varying_slot.
+         *
+         * For modern APIs (GLES or VK), this should be 0.
+         */
+        uint32_t fixed_varying_mask;
 
         union {
                 struct {
@@ -231,11 +244,11 @@ struct bifrost_message_preload {
         unsigned num_components;
 
         /* If texture is set, performs a texture instruction according to
-         * sampler_index, skip, and zero_lod. If texture is unset, only the
+         * texture_index, skip, and zero_lod. If texture is unset, only the
          * varying load is performed.
          */
         bool texture, skip, zero_lod;
-        unsigned sampler_index;
+        unsigned texture_index;
 };
 
 struct bifrost_shader_info {
@@ -334,6 +347,7 @@ struct pan_shader_info {
         unsigned texture_count;
         unsigned ubo_count;
         unsigned attribute_count;
+        unsigned attributes_read;
 
         struct {
                 unsigned input_count;

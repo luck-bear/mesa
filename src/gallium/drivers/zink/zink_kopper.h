@@ -46,6 +46,7 @@ struct kopper_swapchain {
 enum kopper_type {
    KOPPER_X11,
    KOPPER_WAYLAND,
+   KOPPER_WIN32
 };
 
 struct kopper_displaytarget
@@ -58,16 +59,21 @@ struct kopper_displaytarget
    void *loader_private;
 
    VkSurfaceKHR surface;
+   uint32_t present_modes; //VkPresentModeKHR bitmask
    struct kopper_swapchain *swapchain;
    struct kopper_swapchain *old_swapchain;
 
    struct kopper_loader_info info;
+   struct util_queue_fence present_fence;
 
    VkSurfaceCapabilitiesKHR caps;
    VkImageFormatListCreateInfoKHR format_list;
    enum kopper_type type;
+   bool is_kill;
+   VkPresentModeKHR present_mode;
 };
 
+struct zink_context;
 struct zink_screen;
 struct zink_resource;
 
@@ -106,4 +112,14 @@ bool
 zink_kopper_present_readback(struct zink_context *ctx, struct zink_resource *res);
 void
 zink_kopper_deinit_displaytarget(struct zink_screen *screen, struct kopper_displaytarget *cdt);
+bool
+zink_kopper_update(struct pipe_screen *pscreen, struct pipe_resource *pres, int *w, int *h);
+bool
+zink_kopper_is_cpu(const struct pipe_screen *pscreen);
+void
+zink_kopper_fixup_depth_buffer(struct zink_context *ctx);
+bool
+zink_kopper_check(struct pipe_resource *pres);
+void
+zink_kopper_set_swap_interval(struct pipe_screen *pscreen, struct pipe_resource *pres, int interval);
 #endif

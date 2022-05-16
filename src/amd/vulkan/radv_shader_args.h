@@ -21,6 +21,9 @@
  * IN THE SOFTWARE.
  */
 
+#ifndef RADV_SHADER_ARGS_H
+#define RADV_SHADER_ARGS_H
+
 #include "compiler/shader_enums.h"
 #include "util/list.h"
 #include "util/macros.h"
@@ -33,7 +36,10 @@ struct radv_shader_args {
    struct ac_shader_args ac;
 
    struct ac_arg descriptor_sets[MAX_SETS];
+   /* User data 0/1. GFX: descriptor list, Compute: scratch BO */
    struct ac_arg ring_offsets;
+   /* User data 2/3. same as the descriptor list above but for task shaders. */
+   struct ac_arg task_ring_offsets;
 
    /* Streamout */
    struct ac_arg streamout_buffers;
@@ -43,6 +49,10 @@ struct radv_shader_args {
    struct ac_arg ngg_culling_settings;
    struct ac_arg ngg_viewport_scale[2];
    struct ac_arg ngg_viewport_translate[2];
+
+   /* Task shaders */
+   struct ac_arg task_ib_addr;
+   struct ac_arg task_ib_stride;
 
    struct ac_arg prolog_inputs;
    struct ac_arg vs_inputs[MAX_VERTEX_ATTRIBS];
@@ -66,7 +76,9 @@ radv_shader_args_from_ac(struct ac_shader_args *args)
 struct radv_pipeline_key;
 struct radv_shader_info;
 
-void radv_declare_shader_args(enum chip_class chip_class, const struct radv_pipeline_key *key,
+void radv_declare_shader_args(enum amd_gfx_level gfx_level, const struct radv_pipeline_key *key,
                               const struct radv_shader_info *info, gl_shader_stage stage,
                               bool has_previous_stage, gl_shader_stage previous_stage,
                               struct radv_shader_args *args);
+
+#endif

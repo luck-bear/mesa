@@ -83,9 +83,12 @@ if with_imagination_srv
     'winsys/pvrsrvkm/pvr_srv.c',
     'winsys/pvrsrvkm/pvr_srv_bo.c',
     'winsys/pvrsrvkm/pvr_srv_bridge.c',
+    'winsys/pvrsrvkm/pvr_srv_job_common.c',
     'winsys/pvrsrvkm/pvr_srv_job_compute.c',
+    'winsys/pvrsrvkm/pvr_srv_job_null.c',
     'winsys/pvrsrvkm/pvr_srv_job_render.c',
-    'winsys/pvrsrvkm/pvr_srv_syncobj.c',
+    'winsys/pvrsrvkm/pvr_srv_job_transfer.c',
+    'winsys/pvrsrvkm/pvr_srv_sync.c',
   )
   pvr_flags += '-DPVR_SUPPORT_SERVICES_DRIVER'
 endif

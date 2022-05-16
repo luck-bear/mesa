@@ -103,6 +103,9 @@ lower_shader_system_values(struct nir_builder *builder, nir_instr *instr,
    case nir_intrinsic_load_base_instance:
       offset = offsetof(struct dxil_spirv_vertex_runtime_data, base_instance);
       break;
+   case nir_intrinsic_load_draw_id:
+      offset = offsetof(struct dxil_spirv_vertex_runtime_data, draw_id);
+      break;
    default:
       return false;
    }
@@ -527,6 +530,9 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
       return false;
 
    struct spirv_to_nir_options spirv_opts = {
+      .caps = {
+         .draw_parameters = true,
+      },
       .ubo_addr_format = nir_address_format_32bit_index_offset,
       .ssbo_addr_format = nir_address_format_32bit_index_offset,
       .shared_addr_format = nir_address_format_32bit_offset_as_64bit,
@@ -564,6 +570,13 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
    NIR_PASS_V(nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
 
    NIR_PASS_V(nir, nir_lower_system_values);
+
+   // Force sample-rate shading if we're asked to.
+   if (conf->force_sample_rate_shading) {
+      assert(stage == MESA_SHADER_FRAGMENT);
+      nir_foreach_shader_in_variable(var, nir)
+         var->data.sample = true;
+   }
 
    if (conf->zero_based_vertex_instance_id) {
       // vertex_id and instance_id should have already been transformed to
@@ -705,7 +718,9 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
    }
 
    NIR_PASS_V(nir, nir_lower_readonly_images_to_tex, true);
-   nir_lower_tex_options lower_tex_options = {0};
+   nir_lower_tex_options lower_tex_options = {
+      .lower_invalid_implicit_lod = true,
+   };
    NIR_PASS_V(nir, nir_lower_tex, &lower_tex_options);
 
    NIR_PASS_V(nir, dxil_spirv_nir_fix_sample_mask_type);
@@ -714,6 +729,7 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
    NIR_PASS_V(nir, dxil_nir_lower_loads_stores_to_dxil);
    NIR_PASS_V(nir, dxil_nir_split_typed_samplers);
    NIR_PASS_V(nir, dxil_nir_lower_bool_input);
+   NIR_PASS_V(nir, dxil_nir_lower_ubo_array_one_to_static);
    NIR_PASS_V(nir, nir_opt_dce);
    NIR_PASS_V(nir, nir_remove_dead_variables, nir_var_uniform, NULL);
 

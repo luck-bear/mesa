@@ -2774,15 +2774,16 @@ tc_set_debug_callback(struct pipe_context *_pipe,
    struct threaded_context *tc = threaded_context(_pipe);
    struct pipe_context *pipe = tc->pipe;
 
+   tc_sync(tc);
+
    /* Drop all synchronous debug callbacks. Drivers are expected to be OK
     * with this. shader-db will use an environment variable to disable
     * the threaded context.
     */
-   if (cb && cb->debug_message && !cb->async)
-      return;
-
-   tc_sync(tc);
-   pipe->set_debug_callback(pipe, cb);
+   if (cb && !cb->async)
+      pipe->set_debug_callback(pipe, NULL);
+   else
+      pipe->set_debug_callback(pipe, cb);
 }
 
 static void
@@ -4298,8 +4299,6 @@ threaded_context_create(struct pipe_context *pipe,
 
    if (!pipe)
       return NULL;
-
-   util_cpu_detect();
 
    if (!debug_get_bool_option("GALLIUM_THREAD", util_get_cpu_caps()->nr_cpus > 1))
       return pipe;

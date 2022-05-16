@@ -79,7 +79,7 @@ struct wsi_image {
    uint32_t sizes[4];
    uint32_t offsets[4];
    uint32_t row_pitches[4];
-   int fds[4];
+   int dma_buf_fd;
 };
 
 struct wsi_swapchain {
@@ -182,6 +182,9 @@ VkResult
 wsi_create_image(const struct wsi_swapchain *chain,
                  const struct wsi_image_info *info,
                  struct wsi_image *image);
+void
+wsi_image_init(struct wsi_image *image);
+
 void
 wsi_destroy_image(const struct wsi_swapchain *chain,
                   struct wsi_image *image);

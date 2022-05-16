@@ -46,7 +46,7 @@ int virgl_debug = 0;
 static const struct debug_named_value virgl_debug_options[] = {
    { "verbose",   VIRGL_DEBUG_VERBOSE,             NULL },
    { "tgsi",      VIRGL_DEBUG_TGSI,                NULL },
-   { "nir",       VIRGL_DEBUG_NIR,                 NULL },
+   { "use_tgsi",  VIRGL_DEBUG_USE_TGSI,            NULL },
    { "noemubgra", VIRGL_DEBUG_NO_EMULATE_BGRA,     "Disable tweak to emulate BGRA as RGBA on GLES hosts"},
    { "nobgraswz", VIRGL_DEBUG_NO_BGRA_DEST_SWIZZLE,"Disable tweak to swizzle emulated BGRA on GLES hosts" },
    { "sync",      VIRGL_DEBUG_SYNC,                "Sync after every flush" },
@@ -315,7 +315,6 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_PCI_BUS:
    case PIPE_CAP_PCI_DEVICE:
    case PIPE_CAP_PCI_FUNCTION:
-   case PIPE_CAP_GLSL_OPTIMIZE_CONSERVATIVELY:
    case PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION:
       return 0;
    case PIPE_CAP_CLEAR_TEXTURE:
@@ -342,8 +341,6 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_DEST_SURFACE_SRGB_CONTROL:
       return (vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_SRGB_WRITE_CONTROL) ||
             (vscreen->caps.caps.v2.host_feature_check_version < 1);
-   case PIPE_CAP_TGSI_SKIP_SHRINK_IO_ARRAYS:
-      return vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_INDIRECT_INPUT_ADDR;
    case PIPE_CAP_SHAREABLE_SHADERS:
       /* Shader creation emits the shader through the context's command buffer
        * in virgl_encode_shader_state().
@@ -437,15 +434,13 @@ virgl_get_shader_param(struct pipe_screen *screen,
          else
             return vscreen->caps.caps.v2.max_shader_image_other_stages;
       case PIPE_SHADER_CAP_PREFERRED_IR:
-         return (virgl_debug & VIRGL_DEBUG_NIR) ? PIPE_SHADER_IR_NIR : PIPE_SHADER_IR_TGSI;
+         return (virgl_debug & VIRGL_DEBUG_USE_TGSI) ? PIPE_SHADER_IR_TGSI : PIPE_SHADER_IR_NIR;
       case PIPE_SHADER_CAP_SUPPORTED_IRS:
-         return (1 << PIPE_SHADER_IR_TGSI) | ((virgl_debug & VIRGL_DEBUG_NIR) ? (1 << PIPE_SHADER_IR_NIR) : 0);
+         return (1 << PIPE_SHADER_IR_TGSI) | ((virgl_debug & VIRGL_DEBUG_USE_TGSI) ? 0 : (1 << PIPE_SHADER_IR_NIR));
       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
          return vscreen->caps.caps.v2.max_atomic_counters[shader];
       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
          return vscreen->caps.caps.v2.max_atomic_counter_buffers[shader];
-      case PIPE_SHADER_CAP_LOWER_IF_THRESHOLD:
-      case PIPE_SHADER_CAP_TGSI_SKIP_MERGE_REGISTERS:
       case PIPE_SHADER_CAP_INT64_ATOMICS:
       case PIPE_SHADER_CAP_FP16:
       case PIPE_SHADER_CAP_FP16_DERIVATIVES:
@@ -961,7 +956,7 @@ static void virgl_disk_cache_create(struct virgl_screen *screen)
    _mesa_sha1_init(&sha1_ctx);
    _mesa_sha1_update(&sha1_ctx, id_sha1, build_id_len);
 
-   uint32_t shader_debug_flags = virgl_debug & VIRGL_DEBUG_NIR;
+   uint32_t shader_debug_flags = virgl_debug & VIRGL_DEBUG_USE_TGSI;
    _mesa_sha1_update(&sha1_ctx, &shader_debug_flags, sizeof(shader_debug_flags));
 
    uint8_t sha1[20];
@@ -1011,6 +1006,16 @@ fixup_renderer(union virgl_caps *caps)
    memcpy(caps->v2.renderer, renderer, renderer_len + 1);
 }
 
+static const void *
+virgl_get_compiler_options(struct pipe_screen *pscreen,
+                           enum pipe_shader_ir ir,
+                           unsigned shader)
+{
+   struct virgl_screen *vscreen = virgl_screen(pscreen);
+
+   return &vscreen->compiler_options;
+}
+
 struct pipe_screen *
 virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *config)
 {
@@ -1051,7 +1056,7 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
    screen->base.get_shader_param = virgl_get_shader_param;
    screen->base.get_compute_param = virgl_get_compute_param;
    screen->base.get_paramf = virgl_get_paramf;
-   screen->base.get_compiler_options = nir_to_tgsi_get_compiler_options;
+   screen->base.get_compiler_options = virgl_get_compiler_options;
    screen->base.is_format_supported = virgl_is_format_supported;
    screen->base.destroy = virgl_destroy_screen;
    screen->base.context_create = virgl_context_create;
@@ -1077,6 +1082,16 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
    union virgl_caps *caps = &screen->caps.caps;
    screen->tweak_gles_emulate_bgra &= !virgl_format_check_bitmask(PIPE_FORMAT_B8G8R8A8_SRGB, caps->v1.render.bitmask, false);
    screen->refcnt = 1;
+
+   /* Set up the NIR shader compiler options now that we've figured out the caps. */
+   screen->compiler_options = *(nir_shader_compiler_options *)
+      nir_to_tgsi_get_compiler_options(&screen->base, PIPE_SHADER_IR_NIR, PIPE_SHADER_FRAGMENT);
+   if (virgl_get_param(&screen->base, PIPE_CAP_DOUBLES)) {
+      /* virglrenderer is missing DFLR support, so avoid turning 64-bit
+       * ffract+fsub back into ffloor.
+       */
+      screen->compiler_options.lower_ffloor = true;
+   }
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct virgl_transfer), 16);
 

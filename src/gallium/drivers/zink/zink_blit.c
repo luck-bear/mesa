@@ -184,7 +184,7 @@ blit_native(struct zink_context *ctx, const struct pipe_blit_info *info, bool *n
    region.srcOffsets[1].y = info->src.box.y + info->src.box.height;
 
    enum pipe_texture_target src_target = src->base.b.target;
-   if (src->need_2D_zs)
+   if (src->need_2D)
       src_target = src_target == PIPE_TEXTURE_1D ? PIPE_TEXTURE_2D : PIPE_TEXTURE_2D_ARRAY;
    switch (src_target) {
    case PIPE_TEXTURE_CUBE:
@@ -222,7 +222,7 @@ blit_native(struct zink_context *ctx, const struct pipe_blit_info *info, bool *n
    assert(region.dstOffsets[0].y != region.dstOffsets[1].y);
 
    enum pipe_texture_target dst_target = dst->base.b.target;
-   if (dst->need_2D_zs)
+   if (dst->need_2D)
       dst_target = dst_target == PIPE_TEXTURE_1D ? PIPE_TEXTURE_2D : PIPE_TEXTURE_2D_ARRAY;
    switch (dst_target) {
    case PIPE_TEXTURE_CUBE:
@@ -259,6 +259,25 @@ blit_native(struct zink_context *ctx, const struct pipe_blit_info *info, bool *n
    return true;
 }
 
+static bool
+try_copy_region(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   struct zink_context *ctx = zink_context(pctx);
+   struct zink_resource *src = zink_resource(info->src.resource);
+   struct zink_resource *dst = zink_resource(info->dst.resource);
+   /* if we're copying between resources with matching aspects then we can probably just copy_region */
+   if (src->aspect != dst->aspect)
+      return false;
+   struct pipe_blit_info new_info = *info;
+
+   if (src->aspect & VK_IMAGE_ASPECT_STENCIL_BIT &&
+       new_info.render_condition_enable &&
+       !ctx->render_condition_active)
+      new_info.render_condition_enable = false;
+
+   return util_try_blit_via_copy_region(pctx, &new_info, ctx->render_condition_active);
+}
+
 void
 zink_blit(struct pipe_context *pctx,
           const struct pipe_blit_info *info)
@@ -274,8 +293,10 @@ zink_blit(struct pipe_context *pctx,
    struct zink_resource *src = zink_resource(info->src.resource);
    struct zink_resource *dst = zink_resource(info->dst.resource);
    bool needs_present_readback = false;
-   if (dst->obj->dt)
-      zink_kopper_acquire(ctx, dst, UINT64_MAX);
+   if (zink_is_swapchain(dst)) {
+      if (!zink_kopper_acquire(ctx, dst, UINT64_MAX))
+         return;
+   }
 
    if (src_desc == dst_desc ||
        src_desc->nr_channels != 4 || src_desc->layout != UTIL_FORMAT_LAYOUT_PLAIN ||
@@ -288,29 +309,32 @@ zink_blit(struct pipe_context *pctx,
          if (blit_resolve(ctx, info, &needs_present_readback))
             goto end;
       } else {
+         if (try_copy_region(pctx, info))
+            goto end;
          if (blit_native(ctx, info, &needs_present_readback))
             goto end;
       }
    }
 
-   /* if we're copying between resources with matching aspects then we can probably just copy_region */
-   if (src->aspect == dst->aspect) {
-      struct pipe_blit_info new_info = *info;
 
-      if (src->aspect & VK_IMAGE_ASPECT_STENCIL_BIT &&
-          new_info.render_condition_enable &&
-          !ctx->render_condition_active)
-         new_info.render_condition_enable = false;
 
-      if (util_try_blit_via_copy_region(pctx, &new_info, ctx->render_condition_active))
-         goto end;
-   }
-
+   bool stencil_blit = false;
    if (!util_blitter_is_blit_supported(ctx->blitter, info)) {
-      debug_printf("blit unsupported %s -> %s\n",
-              util_format_short_name(info->src.resource->format),
-              util_format_short_name(info->dst.resource->format));
-      goto end;
+      if (util_format_is_depth_or_stencil(info->src.resource->format)) {
+         struct pipe_blit_info depth_blit = *info;
+         depth_blit.mask = PIPE_MASK_Z;
+         stencil_blit = util_blitter_is_blit_supported(ctx->blitter, &depth_blit);
+         if (stencil_blit) {
+            zink_blit_begin(ctx, ZINK_BLIT_SAVE_FB | ZINK_BLIT_SAVE_FS | ZINK_BLIT_SAVE_TEXTURES);
+            util_blitter_blit(ctx->blitter, &depth_blit);
+         }
+      }
+      if (!stencil_blit) {
+         mesa_loge("ZINK: blit unsupported %s -> %s",
+                 util_format_short_name(info->src.resource->format),
+                 util_format_short_name(info->dst.resource->format));
+         goto end;
+      }
    }
 
    if (src->obj->dt)
@@ -325,7 +349,28 @@ zink_blit(struct pipe_context *pctx,
                      info->dst.box.x, info->dst.box.x + info->dst.box.width);
    zink_blit_begin(ctx, ZINK_BLIT_SAVE_FB | ZINK_BLIT_SAVE_FS | ZINK_BLIT_SAVE_TEXTURES);
 
-   util_blitter_blit(ctx->blitter, info);
+   if (stencil_blit) {
+      struct pipe_surface *dst_view, dst_templ;
+      util_blitter_default_dst_texture(&dst_templ, info->dst.resource, info->dst.level, info->dst.box.z);
+      dst_view = pctx->create_surface(pctx, info->dst.resource, &dst_templ);
+
+      util_blitter_clear_depth_stencil(ctx->blitter, dst_view, PIPE_CLEAR_STENCIL,
+                                       0, 0, info->dst.box.x, info->dst.box.y,
+                                       info->dst.box.width, info->dst.box.height);
+      zink_blit_begin(ctx, ZINK_BLIT_SAVE_FB | ZINK_BLIT_SAVE_FS | ZINK_BLIT_SAVE_TEXTURES);
+      util_blitter_stencil_fallback(ctx->blitter,
+                                    info->dst.resource,
+                                    info->dst.level,
+                                    &info->dst.box,
+                                    info->src.resource,
+                                    info->src.level,
+                                    &info->src.box,
+                                    info->scissor_enable ? &info->scissor : NULL);
+
+      pipe_surface_release(pctx, &dst_view);
+   } else {
+      util_blitter_blit(ctx->blitter, info);
+   }
 end:
    if (needs_present_readback)
       zink_kopper_present_readback(ctx, src);

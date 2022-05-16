@@ -36,6 +36,7 @@
 #include "util/simple_mtx.h"
 #include "pipe/p_defines.h"
 #include "pipebuffer/pb_slab.h"
+#include "intel/dev/intel_device_info.h"
 
 struct intel_device_info;
 struct util_debug_callback;
@@ -111,7 +112,11 @@ enum iris_domain {
    IRIS_DOMAIN_OTHER_WRITE,
    /** Vertex cache. */
    IRIS_DOMAIN_VF_READ,
-   /** Any other read-only cache. */
+   /** Texture cache. */
+   IRIS_DOMAIN_SAMPLER_READ,
+   /** Pull-style shader constant loads. */
+   IRIS_DOMAIN_PULL_CONSTANT_READ,
+   /** Any other read-only cache, including reads from non-L3 clients. */
    IRIS_DOMAIN_OTHER_READ,
    /** Number of caching domains. */
    NUM_IRIS_DOMAINS,
@@ -125,8 +130,22 @@ enum iris_domain {
 static inline bool
 iris_domain_is_read_only(enum iris_domain access)
 {
-   return access == IRIS_DOMAIN_OTHER_READ ||
-          access == IRIS_DOMAIN_VF_READ;
+   return access >= IRIS_DOMAIN_VF_READ &&
+          access <= IRIS_DOMAIN_OTHER_READ;
+}
+
+static inline bool
+iris_domain_is_l3_coherent(const struct intel_device_info *devinfo,
+                           enum iris_domain access)
+{
+   /* VF reads are coherent with the L3 on Tigerlake+ because we set
+    * the "L3 Bypass Disable" bit in the vertex/index buffer packets.
+    */
+   if (access == IRIS_DOMAIN_VF_READ)
+      return devinfo->ver >= 12;
+
+   return access != IRIS_DOMAIN_OTHER_WRITE &&
+          access != IRIS_DOMAIN_OTHER_READ;
 }
 
 enum iris_mmap_mode {
@@ -579,5 +598,8 @@ void iris_init_border_color_pool(struct iris_bufmgr *bufmgr,
 void iris_destroy_border_color_pool(struct iris_border_color_pool *pool);
 uint32_t iris_upload_border_color(struct iris_border_color_pool *pool,
                                   union pipe_color_union *color);
+
+uint64_t iris_bufmgr_vram_size(struct iris_bufmgr *bufmgr);
+uint64_t iris_bufmgr_sram_size(struct iris_bufmgr *bufmgr);
 
 #endif /* IRIS_BUFMGR_H */

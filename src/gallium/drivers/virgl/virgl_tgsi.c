@@ -49,7 +49,6 @@ enum virgl_input_temps {
    INPUT_TEMP_VIEWPORT_INDEX,
    INPUT_TEMP_BLOCK_ID,
    INPUT_TEMP_HELPER_INVOCATION,
-   INPUT_TEMP_SAMPLEMASK,
    INPUT_TEMP_COUNT,
 };
 
@@ -70,6 +69,8 @@ struct virgl_transform_context {
    unsigned num_writemask_fixups;
 
    struct virgl_input_temp input_temp[INPUT_TEMP_COUNT];
+
+   uint32_t *precise_flags;
 };
 
 static void
@@ -107,8 +108,6 @@ virgl_tgsi_transform_declaration(struct tgsi_transform_context *ctx,
                                                    TGSI_SEMANTIC_BLOCK_ID);
       virgl_tgsi_transform_declaration_input_temp(decl, &vtctx->input_temp[INPUT_TEMP_HELPER_INVOCATION],
                                                    TGSI_SEMANTIC_HELPER_INVOCATION);
-      virgl_tgsi_transform_declaration_input_temp(decl, &vtctx->input_temp[INPUT_TEMP_SAMPLEMASK],
-                                                   TGSI_SEMANTIC_SAMPLEMASK);
       break;
    case TGSI_FILE_OUTPUT:
       switch (decl->Semantic.Name) {
@@ -149,7 +148,7 @@ virgl_tgsi_transform_property(struct tgsi_transform_context *ctx,
    case TGSI_PROPERTY_NUM_CLIPDIST_ENABLED:
    case TGSI_PROPERTY_NUM_CULLDIST_ENABLED:
       if (vtctx->cull_enabled)
-	 ctx->emit_property(ctx, prop);
+    ctx->emit_property(ctx, prop);
       break;
    case TGSI_PROPERTY_NEXT_SHADER:
       break;
@@ -187,11 +186,9 @@ virgl_tgsi_transform_prolog(struct tgsi_transform_context * ctx)
 {
    struct virgl_transform_context *vtctx = (struct virgl_transform_context *)ctx;
 
-   if (vtctx->info.uses_doubles || vtctx->info.file_count[TGSI_FILE_SAMPLER_VIEW]) {
-      vtctx->src_temp = vtctx->next_temp;
-      vtctx->next_temp += 4;
-      tgsi_transform_temps_decl(ctx, vtctx->src_temp, vtctx->src_temp + 3);
-   }
+   vtctx->src_temp = vtctx->next_temp;
+   vtctx->next_temp += 4;
+   tgsi_transform_temps_decl(ctx, vtctx->src_temp, vtctx->src_temp + 3);
 
    if (vtctx->num_writemask_fixups) {
       vtctx->writemask_fixup_temps = vtctx->next_temp;
@@ -219,7 +216,6 @@ virgl_tgsi_transform_prolog(struct tgsi_transform_context * ctx)
     */
    virgl_mov_input_temp_sint(ctx, &vtctx->input_temp[INPUT_TEMP_LAYER]);
    virgl_mov_input_temp_sint(ctx, &vtctx->input_temp[INPUT_TEMP_VIEWPORT_INDEX]);
-   virgl_mov_input_temp_sint(ctx, &vtctx->input_temp[INPUT_TEMP_SAMPLEMASK]);
 
    /* virglrenderer also makes mistakes in the types of block id input
     * references from signed ops, so we use a temp that we do a plain MOV to at
@@ -245,6 +241,8 @@ virgl_tgsi_transform_prolog(struct tgsi_transform_context * ctx)
    }
 
    virgl_mov_input_temp_uint(ctx, &vtctx->input_temp[INPUT_TEMP_HELPER_INVOCATION]);
+
+   vtctx->precise_flags = calloc((vtctx->next_temp + 7)/8, sizeof(uint32_t));
 }
 
 static void
@@ -258,7 +256,7 @@ virgl_tgsi_rewrite_src_for_input_temp(struct virgl_input_temp *temp, struct tgsi
 
 static void
 virgl_tgsi_transform_instruction(struct tgsi_transform_context *ctx,
-				 struct tgsi_full_instruction *inst)
+             struct tgsi_full_instruction *inst)
 {
    struct virgl_transform_context *vtctx = (struct virgl_transform_context *)ctx;
    if (vtctx->fake_fp64 &&
@@ -270,6 +268,45 @@ virgl_tgsi_transform_instruction(struct tgsi_transform_context *ctx,
 
    if (!vtctx->has_precise && inst->Instruction.Precise)
       inst->Instruction.Precise = 0;
+
+   /* For outputs NTT adds a final mov op but NIR doesn't propagate precise with moves,
+    * so that we don't see whether the assignment is from a precise instruction, but
+    * we need to know this to set the output decoration correctly, so propagate the
+    * precise flag with TGSI */
+   for (int i = 0; i < inst->Instruction.NumDstRegs; ++i) {
+      if (inst->Dst[i].Register.File == TGSI_FILE_TEMPORARY) {
+         uint32_t index = inst->Dst[i].Register.Index / 8;
+         uint32_t bits = inst->Dst[i].Register.WriteMask << (inst->Dst[i].Register.Index % 8);
+
+         /* Since we re-use temps set and clear the precise flag according to the last use
+          * for the register index and written components. Since moves are not marked
+          * as precise originally, and we may end up with an if/else clause that assignes
+          * a precise result in the if branche, but does a simple move from a constant
+          * on the else branche, we don't clear the flag when we hit a mov.
+          * We do the conservatiove approach here, because virglrenderer emits different temp
+          * ranges, and we don't want to mark all temps as precise only because we have
+          * one precise output */
+         if (inst->Instruction.Precise)
+            vtctx->precise_flags[index] |= bits;
+         else if (inst->Instruction.Opcode != TGSI_OPCODE_MOV)
+            vtctx->precise_flags[index] &= ~bits;
+      } else if (inst->Instruction.Opcode == TGSI_OPCODE_MOV) {
+         for (int i = 0; i < inst->Instruction.NumSrcRegs; ++i) {
+            if (inst->Src[i].Register.File == TGSI_FILE_TEMPORARY) {
+               uint32_t index = inst->Src[i].Register.Index / 8;
+               uint32_t read_mask = (1 << inst->Src[i].Register.SwizzleX) |
+                                    (1 << inst->Src[i].Register.SwizzleY) |
+                                    (1 << inst->Src[i].Register.SwizzleZ) |
+                                    (1 << inst->Src[i].Register.SwizzleW);
+               uint32_t bits = read_mask << (inst->Dst[i].Register.Index % 8);
+               if (vtctx->precise_flags[index] & bits) {
+                  inst->Instruction.Precise = 1;
+                  break;
+               }
+            }
+         }
+      }
+   }
 
    /* virglrenderer can run out of space in internal buffers for immediates as
     * tex operands.  Move the first immediate tex arg to a temp to save space in
@@ -341,6 +378,32 @@ virgl_tgsi_transform_instruction(struct tgsi_transform_context *ctx,
          inst->Src[i].Register.SwizzleW = TGSI_SWIZZLE_W;
       }
    }
+
+   /* virglrenderer doesn't resolve non-float output write properly,
+    * so we have to first write to a temporary */
+   if (inst->Instruction.Opcode != TGSI_OPCODE_MOV &&
+       !tgsi_get_opcode_info(inst->Instruction.Opcode)->is_tex &&
+       !tgsi_get_opcode_info(inst->Instruction.Opcode)->is_store &&
+       inst->Dst[0].Register.File == TGSI_FILE_OUTPUT &&
+       tgsi_opcode_infer_dst_type(inst->Instruction.Opcode, 0) != TGSI_TYPE_FLOAT)  {
+      struct tgsi_full_instruction op_to_temp = *inst;
+      op_to_temp.Dst[0].Register.File = TGSI_FILE_TEMPORARY;
+      op_to_temp.Dst[0].Register.Index = vtctx->src_temp;
+      op_to_temp.Dst[0].Dimension.Indirect = 0;
+      op_to_temp.Dst[0].Register.Indirect = 0;
+      ctx->emit_instruction(ctx, &op_to_temp);
+
+      inst->Instruction.Opcode = TGSI_OPCODE_MOV;
+      inst->Instruction.NumSrcRegs = 1;
+
+      memset(&inst->Src[0], 0, sizeof(inst->Src[0]));
+      inst->Src[0].Register.File = TGSI_FILE_TEMPORARY;
+      inst->Src[0].Register.Index = vtctx->src_temp;
+      inst->Src[0].Register.SwizzleY = 1;
+      inst->Src[0].Register.SwizzleZ = 2;
+      inst->Src[0].Register.SwizzleW = 3;
+   }
+
    ctx->emit_instruction(ctx, inst);
 
    for (unsigned i = 0; i < inst->Instruction.NumDstRegs; i++) {
@@ -360,12 +423,7 @@ virgl_tgsi_transform_instruction(struct tgsi_transform_context *ctx,
 struct tgsi_token *virgl_tgsi_transform(struct virgl_screen *vscreen, const struct tgsi_token *tokens_in)
 {
    struct virgl_transform_context transform;
-   const uint newLen = tgsi_num_tokens(tokens_in) * 2 /* XXX: how many to allocate? */;
-   struct tgsi_token *new_tokens;
-
-   new_tokens = tgsi_alloc_tokens(newLen);
-   if (!new_tokens)
-      return NULL;
+   const uint newLen = tgsi_num_tokens(tokens_in);
 
    memset(&transform, 0, sizeof(transform));
    transform.base.transform_declaration = virgl_tgsi_transform_declaration;
@@ -382,7 +440,8 @@ struct tgsi_token *virgl_tgsi_transform(struct virgl_screen *vscreen, const stru
 
    tgsi_scan_shader(tokens_in, &transform.info);
 
-   tgsi_transform_shader(tokens_in, new_tokens, newLen, &transform.base);
-
+   struct tgsi_token *new_tokens = tgsi_transform_shader(tokens_in, newLen, &transform.base);
+   free(transform.precise_flags);
    return new_tokens;
+
 }

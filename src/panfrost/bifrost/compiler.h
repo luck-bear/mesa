@@ -33,6 +33,7 @@
 #include "panfrost/util/pan_ir.h"
 #include "util/u_math.h"
 #include "util/half_float.h"
+#include "util/u_worklist.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -465,6 +466,7 @@ typedef struct {
                 struct {
                         enum bi_special special; /* FADD_RSCALE, FMA_RSCALE */
                         enum bi_round round; /* FMA, converts, FADD, _RSCALE, etc */
+                        bool ftz; /* Flush-to-zero for F16_TO_F32 */
                 };
 
                 struct {
@@ -635,6 +637,9 @@ typedef struct {
 
         /* Discard helper threads */
         bool td;
+
+        /* Should flush-to-zero mode be enabled for this clause? */
+        bool ftz;
 } bi_clause;
 
 #define BI_NUM_SLOTS 8
@@ -654,11 +659,11 @@ typedef struct bi_block {
         struct list_head instructions;
 
         /* Index of the block in source order */
-        unsigned name;
+        unsigned index;
 
         /* Control flow graph */
         struct bi_block *successors[2];
-        struct set *predecessors;
+        struct util_dynarray predecessors;
         bool unconditional_jumps;
 
         /* Per 32-bit word live masks for the block indexed by node */
@@ -679,11 +684,17 @@ typedef struct bi_block {
         uint8_t pass_flags;
 } bi_block;
 
+static inline unsigned
+bi_num_predecessors(bi_block *block)
+{
+        return util_dynarray_num_elements(&block->predecessors, bi_block *);
+}
+
 static inline bi_block *
 bi_start_block(struct list_head *blocks)
 {
         bi_block *first = list_first_entry(blocks, bi_block, link);
-        assert(first->predecessors->entries == 0);
+        assert(bi_num_predecessors(first) == 0);
         return first;
 }
 
@@ -727,6 +738,7 @@ typedef struct {
        uint32_t quirks;
        unsigned arch;
        enum bi_idvs_mode idvs;
+       unsigned num_blocks;
 
        /* In any graphics shader, whether the "IDVS with memory
         * allocation" flow is used. This affects how varyings are loaded and
@@ -963,16 +975,8 @@ bi_node_to_index(unsigned node, unsigned node_count)
                 v != NULL && _v < &blk->successors[2]; \
                 _v++, v = *_v) \
 
-/* Based on set_foreach, expanded with automatic type casts */
-
 #define bi_foreach_predecessor(blk, v) \
-        struct set_entry *_entry_##v; \
-        bi_block *v; \
-        for (_entry_##v = _mesa_set_next_entry(blk->predecessors, NULL), \
-                v = (bi_block *) (_entry_##v ? _entry_##v->key : NULL);  \
-                _entry_##v != NULL; \
-                _entry_##v = _mesa_set_next_entry(blk->predecessors, _entry_##v), \
-                v = (bi_block *) (_entry_##v ? _entry_##v->key : NULL))
+        util_dynarray_foreach(&(blk)->predecessors, bi_block *, v)
 
 #define bi_foreach_src(ins, v) \
         for (unsigned v = 0; v < ARRAY_SIZE(ins->src); ++v)
@@ -1338,6 +1342,14 @@ bi_instance_id(bi_builder *b)
 {
         return bi_register((b->shader->arch >= 9) ? 61 : 62);
 }
+
+#define bi_worklist_init(ctx, w) u_worklist_init(w, ctx->num_blocks, ctx)
+#define bi_worklist_push_head(w, block) u_worklist_push_head(w, block, index)
+#define bi_worklist_push_tail(w, block) u_worklist_push_tail(w, block, index)
+#define bi_worklist_peek_head(w) u_worklist_peek_head(w, bi_block, index)
+#define bi_worklist_pop_head(w)  u_worklist_pop_head( w, bi_block, index)
+#define bi_worklist_peek_tail(w) u_worklist_peek_tail(w, bi_block, index)
+#define bi_worklist_pop_tail(w)  u_worklist_pop_tail( w, bi_block, index)
 
 /* NIR passes */
 

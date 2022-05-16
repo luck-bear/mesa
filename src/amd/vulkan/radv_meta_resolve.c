@@ -32,12 +32,12 @@
 
 /* emit 0, 0, 0, 1 */
 static nir_shader *
-build_nir_fs(void)
+build_nir_fs(struct radv_device *dev)
 {
    const struct glsl_type *vec4 = glsl_vec4_type();
    nir_variable *f_color; /* vec4, fragment output color */
 
-   nir_builder b = radv_meta_init_shader(MESA_SHADER_FRAGMENT, "meta_resolve_fs");
+   nir_builder b = radv_meta_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_resolve_fs");
 
    f_color = nir_variable_create(b.shader, nir_var_shader_out, vec4, "f_color");
    f_color->data.location = FRAG_RESULT_DATA0;
@@ -53,7 +53,7 @@ create_pipeline(struct radv_device *device, VkShaderModule vs_module_h, VkFormat
    VkResult result;
    VkDevice device_h = radv_device_to_handle(device);
 
-   nir_shader *fs_module = build_nir_fs();
+   nir_shader *fs_module = build_nir_fs(device);
    if (!fs_module) {
       /* XXX: Need more accurate error */
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -206,7 +206,7 @@ radv_device_init_meta_resolve_state(struct radv_device *device, bool on_demand)
 
    VkResult res = VK_SUCCESS;
    struct radv_meta_state *state = &device->meta_state;
-   nir_shader *vs_module = radv_meta_build_nir_vs_generate_vertices();
+   nir_shader *vs_module = radv_meta_build_nir_vs_generate_vertices(device);
    if (!vs_module) {
       /* XXX: Need more accurate error */
       res = VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -280,7 +280,7 @@ static bool
 image_hw_resolve_compat(const struct radv_device *device, struct radv_image *src_image,
                         struct radv_image *dst_image)
 {
-   if (device->physical_device->rad_info.chip_class >= GFX9) {
+   if (device->physical_device->rad_info.gfx_level >= GFX9) {
       return dst_image->planes[0].surface.u.gfx9.swizzle_mode ==
              src_image->planes[0].surface.u.gfx9.swizzle_mode;
    } else {
@@ -345,7 +345,7 @@ build_resolve_pipeline(struct radv_device *device, unsigned fs_key)
       return result;
    }
 
-   nir_shader *vs_module = radv_meta_build_nir_vs_generate_vertices();
+   nir_shader *vs_module = radv_meta_build_nir_vs_generate_vertices(device);
 
    VkShaderModule vs_module_h = vk_shader_module_handle_from_nir(vs_module);
    result = create_pipeline(device, vs_module_h, radv_fs_key_format_exemplars[fs_key],
@@ -446,7 +446,7 @@ radv_meta_resolve_hardware_image(struct radv_cmd_buffer *cmd_buffer, struct radv
                                     .layerCount = 1,
                                  },
                            },
-                           NULL);
+                           0, NULL);
 
       struct radv_image_view dst_iview;
       radv_image_view_init(&dst_iview, cmd_buffer->device,
@@ -464,7 +464,7 @@ radv_meta_resolve_hardware_image(struct radv_cmd_buffer *cmd_buffer, struct radv
                                     .layerCount = 1,
                                  },
                            },
-                           NULL);
+                           0, NULL);
 
       const VkRenderingAttachmentInfo color_atts[2] = {
          {

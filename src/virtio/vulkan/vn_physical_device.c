@@ -947,7 +947,8 @@ vn_physical_device_get_passthrough_extensions(
       /* promoted to VK_VERSION_1_3 */
       .EXT_4444_formats = true,
       .EXT_extended_dynamic_state = true,
-      .EXT_extended_dynamic_state2 = true,
+      /* TODO re-enable with fixed extended_dynamic_state.*_raster cts */
+      .EXT_extended_dynamic_state2 = false,
       .EXT_image_robustness = true,
       .EXT_shader_demote_to_helper_invocation = true,
 
@@ -2066,7 +2067,9 @@ vn_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
          }
          break;
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENTATION_PROPERTIES_ANDROID:
-         u.presentation_properties->sharedImage = VK_FALSE;
+         u.presentation_properties->sharedImage =
+            vn_android_gralloc_get_shared_present_usage() ? VK_TRUE
+                                                          : VK_FALSE;
          break;
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_PROPERTIES_EXT:
          *u.provoking_vertex = props->provoking_vertex;
