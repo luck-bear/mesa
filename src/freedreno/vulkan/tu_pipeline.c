@@ -2660,11 +2660,12 @@ tu_shaders_deserialize(struct vk_device *_device,
 
 static struct tu_compiled_shaders *
 tu_pipeline_cache_lookup(struct vk_pipeline_cache *cache,
-                         const void *key_data, size_t key_size)
+                         const void *key_data, size_t key_size,
+                         bool *application_cache_hit)
 {
    struct vk_pipeline_cache_object *object =
       vk_pipeline_cache_lookup_object(cache, key_data, key_size,
-                                      &tu_shaders_ops, NULL);
+                                      &tu_shaders_ops, application_cache_hit);
    if (object)
       return container_of(object, struct tu_compiled_shaders, base);
    else
@@ -2689,6 +2690,16 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
    const VkPipelineShaderStageCreateInfo *stage_infos[MESA_SHADER_STAGES] = {
       NULL
    };
+   VkPipelineCreationFeedbackEXT pipeline_feedback = {
+      .flags = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT,
+   };
+   VkPipelineCreationFeedbackEXT stage_feedbacks[MESA_SHADER_STAGES] = { 0 };
+
+   int64_t pipeline_start = os_time_get_nano();
+
+   const VkPipelineCreationFeedbackCreateInfo *creation_feedback =
+      vk_find_struct_const(builder->create_info->pNext, PIPELINE_CREATION_FEEDBACK_CREATE_INFO);
+
    for (uint32_t i = 0; i < builder->create_info->stageCount; i++) {
       gl_shader_stage stage =
          vk_to_mesa_shader_stage(builder->create_info->pStages[i].stage);
@@ -2718,12 +2729,25 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
    struct tu_compiled_shaders *compiled_shaders;
 
    if (!executable_info) {
+      bool application_cache_hit = false;
+
       compiled_shaders =
          tu_pipeline_cache_lookup(builder->cache, &pipeline_sha1,
-                                  sizeof(pipeline_sha1));
+                                  sizeof(pipeline_sha1),
+                                  &application_cache_hit);
+
+      if (application_cache_hit && builder->cache != builder->device->mem_cache) {
+         pipeline_feedback.flags |=
+            VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+      }
 
       if (compiled_shaders)
          goto done;
+   }
+
+   if (builder->create_info->flags &
+       VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) {
+      return VK_PIPELINE_COMPILE_REQUIRED;
    }
 
    nir_shader *nir[ARRAY_SIZE(stage_infos)] = { NULL };
@@ -2736,11 +2760,16 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
       if (!stage_info)
          continue;
 
+      int64_t stage_start = os_time_get_nano();
+
       nir[stage] = tu_spirv_to_nir(builder->device, builder->mem_ctx, stage_info, stage);
       if (!nir[stage]) {
          result = VK_ERROR_OUT_OF_HOST_MEMORY;
          goto fail;
       }
+
+      stage_feedbacks[stage].flags = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT;
+      stage_feedbacks[stage].duration += os_time_get_nano() - stage_start;
    }
 
    if (!nir[MESA_SHADER_FRAGMENT]) {
@@ -2770,6 +2799,8 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
         stage < ARRAY_SIZE(nir); stage++) {
       if (!nir[stage])
          continue;
+
+      int64_t stage_start = os_time_get_nano();
 
       struct tu_shader *shader =
          tu_shader_create(builder->device, nir[stage], &keys[stage],
@@ -2802,6 +2833,8 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
       desc_sets |= shader->active_desc_sets;
 
       shaders[stage] = shader;
+
+      stage_feedbacks[stage].duration += os_time_get_nano() - stage_start;
    }
 
    struct tu_shader *last_shader = shaders[MESA_SHADER_GEOMETRY];
@@ -2832,6 +2865,8 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
       if (!shaders[stage])
          continue;
       
+      int64_t stage_start = os_time_get_nano();
+
       compiled_shaders->variants[stage] =
          ir3_shader_create_variant(shaders[stage]->ir3_shader, &ir3_key,
                                    executable_info);
@@ -2839,6 +2874,8 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
          return VK_ERROR_OUT_OF_HOST_MEMORY;
 
       compiled_shaders->push_consts[stage] = shaders[stage]->push_consts;
+
+      stage_feedbacks[stage].duration += os_time_get_nano() - stage_start;
    }
 
    uint32_t safe_constlens = ir3_trim_constlen(compiled_shaders->variants, compiler);
@@ -2851,6 +2888,8 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
          continue;
 
       if (safe_constlens & (1 << stage)) {
+         int64_t stage_start = os_time_get_nano();
+
          ralloc_free(compiled_shaders->variants[stage]);
          compiled_shaders->variants[stage] =
             ir3_shader_create_variant(shaders[stage]->ir3_shader, &ir3_key,
@@ -2859,6 +2898,8 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
             result = VK_ERROR_OUT_OF_HOST_MEMORY;
             goto fail;
          }
+
+         stage_feedbacks[stage].duration += os_time_get_nano() - stage_start;
       }
    }
 
@@ -2900,6 +2941,19 @@ done:
    if (compiled_shaders->variants[MESA_SHADER_TESS_CTRL]) {
       pipeline->tess.patch_type =
          compiled_shaders->variants[MESA_SHADER_TESS_CTRL]->key.tessellation;
+   }
+
+   pipeline_feedback.duration = os_time_get_nano() - pipeline_start;
+   if (creation_feedback) {
+      *creation_feedback->pPipelineCreationFeedback = pipeline_feedback;
+
+      assert(builder->create_info->stageCount == 
+             creation_feedback->pipelineStageCreationFeedbackCount);
+      for (uint32_t i = 0; i < builder->create_info->stageCount; i++) {
+         gl_shader_stage s =
+            vk_to_mesa_shader_stage(builder->create_info->pStages[i].stage);
+         creation_feedback->pPipelineStageCreationFeedbacks[i] = stage_feedbacks[s];
+      }
    }
 
    return VK_SUCCESS;
@@ -3600,7 +3654,7 @@ tu_pipeline_builder_build(struct tu_pipeline_builder *builder,
    result = tu_pipeline_builder_compile_shaders(builder, *pipeline);
    if (result != VK_SUCCESS) {
       vk_object_free(&builder->device->vk, builder->alloc, *pipeline);
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+      return result;
    }
 
    result = tu_pipeline_allocate_cs(builder->device, *pipeline,
@@ -3788,15 +3842,25 @@ tu_CreateGraphicsPipelines(VkDevice device,
                            VkPipeline *pPipelines)
 {
    VkResult final_result = VK_SUCCESS;
+   uint32_t i = 0;
 
-   for (uint32_t i = 0; i < count; i++) {
+   for (; i < count; i++) {
       VkResult result = tu_graphics_pipeline_create(device, pipelineCache,
                                                     &pCreateInfos[i], pAllocator,
                                                     &pPipelines[i]);
 
-      if (result != VK_SUCCESS)
+      if (result != VK_SUCCESS) {
          final_result = result;
+         pPipelines[i] = VK_NULL_HANDLE;
+
+         if (pCreateInfos[i].flags &
+             VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT)
+            break;
+      }
    }
+
+   for (; i < count; i++)
+      pPipelines[i] = VK_NULL_HANDLE;
 
    return final_result;
 }
@@ -3820,6 +3884,15 @@ tu_compute_pipeline_create(VkDevice device,
 
    *pPipeline = VK_NULL_HANDLE;
 
+   VkPipelineCreationFeedbackEXT pipeline_feedback = {
+      .flags = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT,
+   };
+
+   const VkPipelineCreationFeedbackCreateInfo *creation_feedback =
+      vk_find_struct_const(pCreateInfo->pNext, PIPELINE_CREATION_FEEDBACK_CREATE_INFO);
+
+   int64_t pipeline_start = os_time_get_nano();
+
    pipeline = vk_object_zalloc(&dev->vk, pAllocator, sizeof(*pipeline),
                                VK_OBJECT_TYPE_PIPELINE);
    if (!pipeline)
@@ -3828,7 +3901,7 @@ tu_compute_pipeline_create(VkDevice device,
    pipeline->executables_mem_ctx = ralloc_context(NULL);
    util_dynarray_init(&pipeline->executables, pipeline->executables_mem_ctx);
 
-   struct tu_shader_key key;
+   struct tu_shader_key key = { };
    tu_shader_key_init(&key, stage_info, dev);
 
    void *pipeline_mem_ctx = ralloc_context(NULL);
@@ -3841,12 +3914,28 @@ tu_compute_pipeline_create(VkDevice device,
    const bool executable_info = pCreateInfo->flags &
       VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
 
-   if (!executable_info)
-      compiled = tu_pipeline_cache_lookup(cache, pipeline_sha1, sizeof(pipeline_sha1));
+   bool application_cache_hit = false;
+
+   if (!executable_info) {
+      compiled =
+         tu_pipeline_cache_lookup(cache, pipeline_sha1, sizeof(pipeline_sha1),
+                                  &application_cache_hit);
+   }
+
+   if (application_cache_hit && cache != dev->mem_cache) {
+      pipeline_feedback.flags |=
+         VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+   }
 
    char *nir_initial_disasm = NULL;
 
    if (!compiled) {
+      if (pCreateInfo->flags &
+          VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) {
+         result = VK_PIPELINE_COMPILE_REQUIRED;
+         goto fail;
+      }
+
       struct ir3_shader_key ir3_key = {};
 
       nir_shader *nir = tu_spirv_to_nir(dev, pipeline_mem_ctx, stage_info,
@@ -3885,6 +3974,14 @@ tu_compute_pipeline_create(VkDevice device,
       compiled->variants[MESA_SHADER_COMPUTE] = v;
 
       compiled = tu_pipeline_cache_insert(cache, compiled);
+   }
+
+   pipeline_feedback.duration = os_time_get_nano() - pipeline_start;
+
+   if (creation_feedback) {
+      *creation_feedback->pPipelineCreationFeedback = pipeline_feedback;
+      assert(creation_feedback->pipelineStageCreationFeedbackCount == 1);
+      creation_feedback->pPipelineStageCreationFeedbacks[0] = pipeline_feedback;
    }
 
    pipeline->active_desc_sets = compiled->active_desc_sets;
@@ -3945,14 +4042,24 @@ tu_CreateComputePipelines(VkDevice device,
                           VkPipeline *pPipelines)
 {
    VkResult final_result = VK_SUCCESS;
+   uint32_t i = 0;
 
-   for (uint32_t i = 0; i < count; i++) {
+   for (; i < count; i++) {
       VkResult result = tu_compute_pipeline_create(device, pipelineCache,
                                                    &pCreateInfos[i],
                                                    pAllocator, &pPipelines[i]);
-      if (result != VK_SUCCESS)
+      if (result != VK_SUCCESS) {
          final_result = result;
+         pPipelines[i] = VK_NULL_HANDLE;
+
+         if (pCreateInfos[i].flags &
+             VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT)
+            break;
+      }
    }
+
+   for (; i < count; i++)
+      pPipelines[i] = VK_NULL_HANDLE;
 
    return final_result;
 }

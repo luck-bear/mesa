@@ -373,7 +373,9 @@ create_pipeline(struct radv_device *device, VkShaderModule vs_module_h, VkPipeli
       },
       &(struct radv_graphics_pipeline_create_info){
          .use_rectlist = true,
-         .custom_blend_mode = V_028808_CB_DCC_DECOMPRESS_GFX8,
+         .custom_blend_mode = device->physical_device->rad_info.gfx_level >= GFX11
+                                 ? V_028808_CB_DCC_DECOMPRESS_GFX11
+                                 : V_028808_CB_DCC_DECOMPRESS_GFX8,
       },
       &device->meta_state.alloc, &device->meta_state.fast_clear_flush.dcc_decompress_pipeline);
    if (result != VK_SUCCESS)
@@ -494,7 +496,7 @@ radv_process_color_image_layer(struct radv_cmd_buffer *cmd_buffer, struct radv_i
                            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
                            .image = radv_image_to_handle(image),
                            .viewType = radv_meta_get_view_type(image),
-                           .format = image->vk_format,
+                           .format = image->vk.format,
                            .subresourceRange =
                               {
                                  .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -758,7 +760,7 @@ radv_decompress_dcc_compute(struct radv_cmd_buffer *cmd_buffer, struct radv_imag
                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
                .image = radv_image_to_handle(image),
                .viewType = VK_IMAGE_VIEW_TYPE_2D,
-               .format = image->vk_format,
+               .format = image->vk.format,
                .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                                     .baseMipLevel = subresourceRange->baseMipLevel + l,
                                     .levelCount = 1,
@@ -772,7 +774,7 @@ radv_decompress_dcc_compute(struct radv_cmd_buffer *cmd_buffer, struct radv_imag
                .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
                .image = radv_image_to_handle(image),
                .viewType = VK_IMAGE_VIEW_TYPE_2D,
-               .format = image->vk_format,
+               .format = image->vk.format,
                .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                                     .baseMipLevel = subresourceRange->baseMipLevel + l,
                                     .levelCount = 1,

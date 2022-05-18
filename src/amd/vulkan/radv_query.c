@@ -1364,12 +1364,15 @@ radv_CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uin
     */
    cmd_buffer->state.flush_bits |= cmd_buffer->active_query_flush_bits;
 
-   flush_bits |= radv_fill_buffer(cmd_buffer, NULL, pool->bo, firstQuery * pool->stride,
+   flush_bits |= radv_fill_buffer(cmd_buffer, NULL, pool->bo,
+                                  radv_buffer_get_va(pool->bo) + firstQuery * pool->stride,
                                   queryCount * pool->stride, value);
 
    if (pool->type == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
-      flush_bits |= radv_fill_buffer(cmd_buffer, NULL, pool->bo,
-                                     pool->availability_offset + firstQuery * 4, queryCount * 4, 0);
+      flush_bits |=
+         radv_fill_buffer(cmd_buffer, NULL, pool->bo,
+                          radv_buffer_get_va(pool->bo) + pool->availability_offset + firstQuery * 4,
+                          queryCount * 4, 0);
    }
 
    if (flush_bits) {
@@ -1445,8 +1448,26 @@ emit_begin_query(struct radv_cmd_buffer *cmd_buffer, struct radv_query_pool *poo
          }
       }
 
+      if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX11) {
+         uint64_t rb_mask =
+            BITFIELD64_MASK(cmd_buffer->device->physical_device->rad_info.max_render_backends);
+
+         radeon_emit(cs, PKT3(PKT3_EVENT_WRITE, 2, 0));
+         radeon_emit(cs, EVENT_TYPE(V_028A90_PIXEL_PIPE_STAT_CONTROL) | EVENT_INDEX(1));
+         radeon_emit(cs, PIXEL_PIPE_STATE_CNTL_COUNTER_ID(0) |
+                         PIXEL_PIPE_STATE_CNTL_STRIDE(2) |
+                         PIXEL_PIPE_STATE_CNTL_INSTANCE_EN_LO(rb_mask));
+         radeon_emit(cs, PIXEL_PIPE_STATE_CNTL_INSTANCE_EN_HI(rb_mask));
+      }
+
       radeon_emit(cs, PKT3(PKT3_EVENT_WRITE, 2, 0));
-      radeon_emit(cs, EVENT_TYPE(V_028A90_ZPASS_DONE) | EVENT_INDEX(1));
+
+      if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX11) {
+         radeon_emit(cs, EVENT_TYPE(V_028A90_PIXEL_PIPE_STAT_DUMP) | EVENT_INDEX(1));
+      } else {
+         radeon_emit(cs, EVENT_TYPE(V_028A90_ZPASS_DONE) | EVENT_INDEX(1));
+      }
+
       radeon_emit(cs, va);
       radeon_emit(cs, va >> 32);
       break;
@@ -1520,7 +1541,11 @@ emit_end_query(struct radv_cmd_buffer *cmd_buffer, struct radv_query_pool *pool,
       }
 
       radeon_emit(cs, PKT3(PKT3_EVENT_WRITE, 2, 0));
-      radeon_emit(cs, EVENT_TYPE(V_028A90_ZPASS_DONE) | EVENT_INDEX(1));
+      if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX11) {
+         radeon_emit(cs, EVENT_TYPE(V_028A90_PIXEL_PIPE_STAT_DUMP) | EVENT_INDEX(1));
+      } else {
+         radeon_emit(cs, EVENT_TYPE(V_028A90_ZPASS_DONE) | EVENT_INDEX(1));
+      }
       radeon_emit(cs, va + 8);
       radeon_emit(cs, (va + 8) >> 32);
 

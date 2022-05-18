@@ -298,6 +298,7 @@ struct pipe_h264_sps
    uint8_t  frame_mbs_only_flag;
    uint8_t  mb_adaptive_frame_field_flag;
    uint8_t  direct_8x8_inference_flag;
+   uint8_t  MinLumaBiPredSize8x8;
 };
 
 struct pipe_h264_pps
@@ -314,6 +315,7 @@ struct pipe_h264_pps
    uint8_t  weighted_pred_flag;
    uint8_t  weighted_bipred_idc;
    int8_t   pic_init_qp_minus26;
+   int8_t   pic_init_qs_minus26;
    int8_t   chroma_qp_index_offset;
    uint8_t  deblocking_filter_control_present_flag;
    uint8_t  constrained_intra_pred_flag;
@@ -353,7 +355,9 @@ struct pipe_h264_picture_desc
    uint32_t frame_num_list[16];
 
    struct pipe_video_buffer *ref[16];
-   void    *private;
+
+   /* using private as a parameter name conflicts with C++ keywords */
+   void    *priv;
 };
 
 struct pipe_h264_enc_rate_control
@@ -394,6 +398,16 @@ struct pipe_h264_enc_pic_control
    unsigned enc_frame_crop_bottom_offset;
 };
 
+struct h264_slice_descriptor
+{
+   /** Starting MB address for this slice. */
+   uint32_t    macroblock_address;
+   /** Number of macroblocks in this slice. */
+   uint32_t    num_macroblocks;
+   /** slice type. */
+   enum pipe_h264_slice_type slice_type;
+};
+
 struct pipe_h264_enc_picture_desc
 {
    struct pipe_picture_desc base;
@@ -416,8 +430,10 @@ struct pipe_h264_enc_picture_desc
    unsigned gop_cnt;
    unsigned pic_order_cnt;
    unsigned pic_order_cnt_type;
-   unsigned ref_idx_l0;
-   unsigned ref_idx_l1;
+   unsigned num_ref_idx_l0_active_minus1;
+   unsigned num_ref_idx_l1_active_minus1;
+   unsigned ref_idx_l0_list[32];
+   unsigned ref_idx_l1_list[32];
    unsigned gop_size;
    unsigned ref_pic_mode;
    unsigned num_temporal_layers;
@@ -426,6 +442,8 @@ struct pipe_h264_enc_picture_desc
    bool enable_vui;
    struct hash_table *frame_idx;
 
+   unsigned num_slice_descriptors;
+   struct h264_slice_descriptor slices_descriptors[128];
 };
 
 struct pipe_h265_enc_seq_param

@@ -2452,16 +2452,6 @@ static bool si_is_format_supported(struct pipe_screen *screen, enum pipe_format 
          if (sample_count > max_eqaa_samples || storage_sample_count > max_samples)
             return false;
       }
-
-      /* Gfx11: BGRA doesn't work with samples >= 4. Only allow R/0/1 to be the first
-       * component for simplicity.
-       */
-      if (sscreen->info.gfx_level >= GFX11 &&
-          !util_format_is_depth_or_stencil(format) &&
-          util_format_description(format)->swizzle[0] != PIPE_SWIZZLE_X &&
-          util_format_description(format)->swizzle[0] != PIPE_SWIZZLE_0 &&
-          util_format_description(format)->swizzle[0] != PIPE_SWIZZLE_1)
-         return false;
    }
 
    if (usage & (PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_SHADER_IMAGE)) {
@@ -4566,8 +4556,11 @@ static struct pipe_sampler_view *si_create_sampler_view(struct pipe_context *ctx
 
    /* Buffer resource. */
    if (texture->target == PIPE_BUFFER) {
+      uint32_t size = si_clamp_texture_texel_count(sctx->screen->max_texture_buffer_size,
+                                                   state->format, state->u.buf.size);
+
       si_make_buffer_descriptor(sctx->screen, si_resource(texture), state->format,
-                                state->u.buf.offset, state->u.buf.size, view->state);
+                                state->u.buf.offset, size, view->state);
       return &view->base;
    }
 
@@ -5893,14 +5886,11 @@ void si_init_cs_preamble_state(struct si_context *sctx, bool uses_reg_shadowing)
                      S_028620_VERTEX_RATE(2) | S_028620_PRIM_RATE(1));
 
       /* We must wait for idle before changing the SPI attribute ring registers. */
-      si_pm4_cmd_add(pm4, PKT3(PKT3_EVENT_WRITE, 0, 0));
-      si_pm4_cmd_add(pm4, EVENT_TYPE(V_028A90_VS_PARTIAL_FLUSH) | EVENT_INDEX(4));
-
-      si_pm4_cmd_add(pm4, PKT3(PKT3_EVENT_WRITE, 0, 0));
-      si_pm4_cmd_add(pm4, EVENT_TYPE(V_028A90_VGT_FLUSH) | EVENT_INDEX(0));
-
-      si_pm4_cmd_add(pm4, PKT3(PKT3_EVENT_WRITE, 0, 0));
-      si_pm4_cmd_add(pm4, EVENT_TYPE(V_028A90_PS_PARTIAL_FLUSH) | EVENT_INDEX(4));
+      /* TODO: Find a more reliable way to wait for idle. */
+      for (unsigned i = 0; i < 4; i++) {
+         si_pm4_cmd_add(pm4, PKT3(PKT3_EVENT_WRITE, 0, 0));
+         si_pm4_cmd_add(pm4, EVENT_TYPE(V_028A90_PS_PARTIAL_FLUSH) | EVENT_INDEX(4));
+      }
 
       si_pm4_set_reg(pm4, R_031110_SPI_GS_THROTTLE_CNTL1, 0x12355123);
       si_pm4_set_reg(pm4, R_031114_SPI_GS_THROTTLE_CNTL2, 0x1544D);
@@ -5918,4 +5908,8 @@ void si_init_cs_preamble_state(struct si_context *sctx, bool uses_reg_shadowing)
    }
 
    sctx->cs_preamble_state = pm4;
+
+   /* Make a copy of the preamble for TMZ. */
+   sctx->cs_preamble_state_tmz = (struct si_pm4_state *)CALLOC_STRUCT(si_cs_preamble);
+   memcpy(sctx->cs_preamble_state_tmz, sctx->cs_preamble_state, sizeof(struct si_cs_preamble));
 }

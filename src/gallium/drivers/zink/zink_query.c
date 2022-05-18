@@ -1293,17 +1293,29 @@ zink_get_query_result_resource(struct pipe_context *pctx,
    force_cpu_read(ctx, pquery, result_type, pres, offset);
 }
 
-static uint64_t
-zink_get_timestamp(struct pipe_context *pctx)
+uint64_t
+zink_get_timestamp(struct pipe_screen *pscreen)
 {
-   struct zink_screen *screen = zink_screen(pctx->screen);
+   struct zink_screen *screen = zink_screen(pscreen);
    uint64_t timestamp, deviation;
-   assert(screen->info.have_EXT_calibrated_timestamps);
-   VkCalibratedTimestampInfoEXT cti = {0};
-   cti.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT;
-   cti.timeDomain = VK_TIME_DOMAIN_DEVICE_EXT;
-   if (VKSCR(GetCalibratedTimestampsEXT)(screen->dev, 1, &cti, &timestamp, &deviation) != VK_SUCCESS) {
-      mesa_loge("ZINK: vkGetCalibratedTimestampsEXT failed");
+   if (screen->info.have_EXT_calibrated_timestamps) {
+      VkCalibratedTimestampInfoEXT cti = {0};
+      cti.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT;
+      cti.timeDomain = VK_TIME_DOMAIN_DEVICE_EXT;
+      if (VKSCR(GetCalibratedTimestampsEXT)(screen->dev, 1, &cti, &timestamp, &deviation) != VK_SUCCESS) {
+         mesa_loge("ZINK: vkGetCalibratedTimestampsEXT failed");
+      }
+   } else {
+      struct pipe_context *pctx = &screen->copy_context->base;
+      struct pipe_query *pquery = pctx->create_query(pctx, PIPE_QUERY_TIMESTAMP, 0);
+      if (!pquery)
+         return 0;
+      union pipe_query_result result = {0};
+      pctx->begin_query(pctx, pquery);
+      pctx->end_query(pctx, pquery);
+      pctx->get_query_result(pctx, pquery, true, &result);
+      pctx->destroy_query(pctx, pquery);
+      timestamp = result.u64;
    }
    timestamp_to_nanoseconds(screen, &timestamp);
    return timestamp;
@@ -1324,5 +1336,4 @@ zink_context_query_init(struct pipe_context *pctx)
    pctx->get_query_result_resource = zink_get_query_result_resource;
    pctx->set_active_query_state = zink_set_active_query_state;
    pctx->render_condition = zink_render_condition;
-   pctx->get_timestamp = zink_get_timestamp;
 }

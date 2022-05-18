@@ -1339,7 +1339,11 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 		.lower_insert_byte = true,
 		.lower_insert_word = true,
 		.lower_rotate = true,
-		.max_unroll_iterations = 32,
+		/* due to a bug in the shader compiler, some loops hang
+		 * if they are not unrolled, see:
+		 *    https://bugs.freedesktop.org/show_bug.cgi?id=86720
+		 */
+		.max_unroll_iterations = 255,
 		.lower_interpolate_at = true,
 		.vectorize_io = true,
 		.has_umad24 = true,
@@ -1363,6 +1367,9 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
          * lowered version, the NIT code path does the rightthing with the
          * lowered code */
         rscreen->nir_options.lower_fpow = rscreen->debug_flags & DBG_NIR_PREFERRED;
+
+        if (rscreen->info.family < CHIP_CEDAR)
+           rscreen->nir_options.force_indirect_unrolling_sampler = true;
 
 	if (rscreen->info.gfx_level < EVERGREEN) {
 		/* Pre-EG doesn't have these ALU ops */

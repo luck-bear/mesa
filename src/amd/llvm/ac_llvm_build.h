@@ -134,7 +134,7 @@ struct ac_llvm_context {
 
    enum amd_gfx_level gfx_level;
    enum radeon_family family;
-   const struct radeon_info *info;
+   bool has_3d_cube_border_color_mipmap;
 
    unsigned wave_size;
    unsigned ballot_mask_bits;
@@ -146,7 +146,7 @@ struct ac_llvm_context {
 
 void ac_llvm_context_init(struct ac_llvm_context *ctx, struct ac_llvm_compiler *compiler,
                           enum amd_gfx_level gfx_level, enum radeon_family family,
-                          const struct radeon_info *info,
+                          bool has_3d_cube_border_color_mipmap,
                           enum ac_float_mode float_mode, unsigned wave_size,
                           unsigned ballot_mask_bits);
 
@@ -556,7 +556,7 @@ LLVMValueRef ac_build_atomic_cmp_xchg(struct ac_llvm_context *ctx, LLVMValueRef 
                                       LLVMValueRef cmp, LLVMValueRef val, const char *sync_scope);
 
 void ac_export_mrt_z(struct ac_llvm_context *ctx, LLVMValueRef depth, LLVMValueRef stencil,
-                     LLVMValueRef samplemask, LLVMValueRef mrtz_alpha, bool is_last,
+                     LLVMValueRef samplemask, LLVMValueRef mrt0_alpha, bool is_last,
                      struct ac_export_args *args);
 
 void ac_build_sendmsg_gs_alloc_req(struct ac_llvm_context *ctx, LLVMValueRef wave_id,

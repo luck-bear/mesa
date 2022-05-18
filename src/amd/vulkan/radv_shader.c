@@ -275,14 +275,14 @@ radv_spirv_nir_debug(void *private_data, enum nir_spirv_debug_level level, size_
 }
 
 static void
-radv_compiler_debug(void *private_data, enum radv_compiler_debug_level level, const char *message)
+radv_compiler_debug(void *private_data, enum aco_compiler_debug_level level, const char *message)
 {
    struct radv_shader_debug_data *debug_data = private_data;
    struct radv_instance *instance = debug_data->device->instance;
 
    static const VkDebugReportFlagsEXT vk_flags[] = {
-      [RADV_COMPILER_DEBUG_LEVEL_PERFWARN] = VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT,
-      [RADV_COMPILER_DEBUG_LEVEL_ERROR] = VK_DEBUG_REPORT_ERROR_BIT_EXT,
+      [ACO_COMPILER_DEBUG_LEVEL_PERFWARN] = VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT,
+      [ACO_COMPILER_DEBUG_LEVEL_ERROR] = VK_DEBUG_REPORT_ERROR_BIT_EXT,
    };
 
    /* VK_DEBUG_REPORT_DEBUG_BIT_EXT specifies diagnostic information
@@ -553,8 +553,8 @@ radv_lower_fs_intrinsics(nir_shader *nir, const struct radv_pipeline_stage *fs_s
 }
 
 nir_shader *
-radv_shader_compile_to_nir(struct radv_device *device, const struct radv_pipeline_stage *stage,
-                           const struct radv_pipeline_key *key)
+radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_pipeline_stage *stage,
+                         const struct radv_pipeline_key *key)
 {
    unsigned subgroup_size = 64, ballot_bit_size = 64;
    if (key->cs.compute_subgroup_size) {
@@ -1987,7 +1987,7 @@ shader_compile(struct radv_device *device, struct nir_shader *const *shaders, in
 
    options->family = chip_family;
    options->gfx_level = device->physical_device->rad_info.gfx_level;
-   options->info = &device->physical_device->rad_info;
+   options->has_3d_cube_border_color_mipmap = device->physical_device->rad_info.has_3d_cube_border_color_mipmap;
    options->dump_shader = radv_can_dump_shader(device, shaders[0], gs_copy_shader || trap_handler_shader);
    options->dump_preoptir =
       options->dump_shader && device->instance->debug_flags & RADV_DEBUG_PREOPTIR;
@@ -2012,8 +2012,10 @@ shader_compile(struct radv_device *device, struct nir_shader *const *shaders, in
 #endif
    } else {
       struct aco_shader_info ac_info;
+      struct aco_compiler_options ac_opts;
+      radv_aco_convert_opts(&ac_opts, options);
       radv_aco_convert_shader_info(&ac_info, info);
-      aco_compile_shader(options, &ac_info, shader_count, shaders, args, &binary);
+      aco_compile_shader(&ac_opts, &ac_info, shader_count, shaders, args, &binary);
    }
 
    binary->info = *info;
@@ -2044,10 +2046,10 @@ shader_compile(struct radv_device *device, struct nir_shader *const *shaders, in
 }
 
 struct radv_shader *
-radv_shader_compile(struct radv_device *device, struct radv_pipeline_stage *pl_stage,
-                    struct nir_shader *const *shaders, int shader_count,
-                    const struct radv_pipeline_key *key, bool keep_shader_info,
-                    bool keep_statistic_info, struct radv_shader_binary **binary_out)
+radv_shader_nir_to_asm(struct radv_device *device, struct radv_pipeline_stage *pl_stage,
+                       struct nir_shader *const *shaders, int shader_count,
+                       const struct radv_pipeline_key *key, bool keep_shader_info,
+                       bool keep_statistic_info, struct radv_shader_binary **binary_out)
 {
    gl_shader_stage stage = shaders[shader_count - 1]->info.stage;
    struct radv_nir_compiler_options options = {0};
@@ -2104,7 +2106,7 @@ radv_create_trap_handler_shader(struct radv_device *device)
                             MESA_SHADER_COMPUTE, false, MESA_SHADER_VERTEX, &args);
 
    shader = shader_compile(device, &b.shader, 1, MESA_SHADER_COMPUTE, &info, &args, &options,
-                           false, true, true, false, &binary);
+                           false, true, false, false, &binary);
 
    trap->alloc = radv_alloc_shader_memory(device, shader->code_size, NULL);
 
@@ -2175,7 +2177,7 @@ radv_create_vs_prolog(struct radv_device *device, const struct radv_vs_prolog_ke
    struct radv_nir_compiler_options options = {0};
    options.family = device->physical_device->rad_info.family;
    options.gfx_level = device->physical_device->rad_info.gfx_level;
-   options.info = &device->physical_device->rad_info;
+   options.has_3d_cube_border_color_mipmap = device->physical_device->rad_info.has_3d_cube_border_color_mipmap;
    options.address32_hi = device->physical_device->rad_info.address32_hi;
    options.dump_shader = device->instance->debug_flags & RADV_DEBUG_DUMP_PROLOGS;
    options.record_ir = device->instance->debug_flags & RADV_DEBUG_HANG;
@@ -2208,9 +2210,11 @@ radv_create_vs_prolog(struct radv_device *device, const struct radv_vs_prolog_ke
    struct radv_prolog_binary *binary = NULL;
    struct aco_shader_info ac_info;
    struct aco_vs_prolog_key ac_key;
+   struct aco_compiler_options ac_opts;
    radv_aco_convert_shader_info(&ac_info, &info);
+   radv_aco_convert_opts(&ac_opts, &options);
    radv_aco_convert_vs_prolog_key(&ac_key, key);
-   aco_compile_vs_prolog(&options, &ac_info, &ac_key, &args, &binary);
+   aco_compile_vs_prolog(&ac_opts, &ac_info, &ac_key, &args, &binary);
    struct radv_shader_prolog *prolog = upload_vs_prolog(device, binary, info.wave_size);
    if (prolog) {
       prolog->nontrivial_divisors = key->state->nontrivial_divisors;
@@ -2365,7 +2369,7 @@ radv_get_max_waves(const struct radv_device *device, struct radv_shader *shader,
    if (conf->num_vgprs) {
       unsigned physical_vgprs = info->num_physical_wave64_vgprs_per_simd * (64 / wave_size);
       unsigned vgprs = align(conf->num_vgprs, wave_size == 32 ? 8 : 4);
-      if (gfx_level >= GFX10_3)
+      if (gfx_level == GFX10_3)
          vgprs = align(vgprs, wave_size == 32 ? 16 : 8);
       max_simd_waves = MIN2(max_simd_waves, physical_vgprs / vgprs);
    }

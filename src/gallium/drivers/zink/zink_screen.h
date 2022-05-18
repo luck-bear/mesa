@@ -43,6 +43,11 @@
 
 #include <vulkan/vulkan.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern uint32_t zink_debug;
 struct hash_table;
 struct util_dl_library;
@@ -61,6 +66,7 @@ enum zink_descriptor_type;
 #define ZINK_DEBUG_SPIRV 0x2
 #define ZINK_DEBUG_TGSI 0x4
 #define ZINK_DEBUG_VALIDATION 0x8
+#define ZINK_DEBUG_SYNC 0x10
 
 #define NUM_SLAB_ALLOCATORS 3
 #define MIN_SLAB_ORDER 8
@@ -294,5 +300,9 @@ zink_stub_function_not_loaded(void);
          warned = true; \
       } \
    } while (0)
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

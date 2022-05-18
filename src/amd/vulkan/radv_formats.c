@@ -1941,7 +1941,7 @@ radv_GetImageSparseMemoryRequirements2(VkDevice _device,
    RADV_FROM_HANDLE(radv_device, device, _device);
    RADV_FROM_HANDLE(radv_image, image, pInfo->image);
 
-   if (!(image->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT)) {
+   if (!(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT)) {
       *pSparseMemoryRequirementCount = 0;
       return;
    }
@@ -1951,7 +1951,7 @@ radv_GetImageSparseMemoryRequirements2(VkDevice _device,
 
    vk_outarray_append_typed(VkSparseImageMemoryRequirements2, &out, req)
    {
-      fill_sparse_image_format_properties(device->physical_device, image->vk_format,
+      fill_sparse_image_format_properties(device->physical_device, image->vk.format,
                                           &req->memoryRequirements.formatProperties);
       req->memoryRequirements.imageMipTailFirstLod = image->planes[0].surface.first_mip_tail_level;
 
@@ -2084,12 +2084,17 @@ radv_get_dcc_channel_type(const struct util_format_description *desc, enum dcc_c
 
 /* Return if it's allowed to reinterpret one format as another with DCC enabled. */
 bool
-radv_dcc_formats_compatible(VkFormat format1, VkFormat format2, bool *sign_reinterpret)
+radv_dcc_formats_compatible(enum amd_gfx_level gfx_level, VkFormat format1, VkFormat format2,
+                            bool *sign_reinterpret)
 {
    const struct util_format_description *desc1, *desc2;
    enum dcc_channel_type type1, type2;
    unsigned size1, size2;
    int i;
+
+   /* All formats are compatible on GFX11. */
+   if (gfx_level >= GFX11)
+      return true;
 
    if (format1 == format2)
       return true;

@@ -304,7 +304,11 @@ void si_set_tracked_regs_to_clear_state(struct si_context *ctx)
 
    /* Set all cleared context registers to saved. */
    ctx->tracked_regs.reg_saved = BITFIELD64_MASK(SI_TRACKED_GE_PC_ALLOC);
-   ctx->last_gs_out_prim = 0; /* cleared by CLEAR_STATE */
+
+   if (ctx->gfx_level >= GFX11)
+      ctx->last_gs_out_prim = -1; /* uconfig register, unknown value */
+   else
+      ctx->last_gs_out_prim = 0; /* context register cleared by CLEAR_STATE */
 }
 
 void si_install_draw_wrapper(struct si_context *sctx, pipe_draw_vbo_func wrapper,
@@ -432,13 +436,13 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
    si_pm4_reset_emitted(ctx, first_cs);
 
    /* The CS initialization should be emitted before everything else. */
-   if (ctx->cs_preamble_state)
-      si_pm4_emit(ctx, ctx->cs_preamble_state);
-   if (ctx->cs_preamble_tess_rings)
-      si_pm4_emit(ctx, unlikely(is_secure) ? ctx->cs_preamble_tess_rings_tmz :
-         ctx->cs_preamble_tess_rings);
-   if (ctx->cs_preamble_gs_rings)
-      si_pm4_emit(ctx, ctx->cs_preamble_gs_rings);
+   if (ctx->cs_preamble_state) {
+      struct si_pm4_state *preamble = is_secure ? ctx->cs_preamble_state_tmz :
+                                                  ctx->cs_preamble_state;
+      ctx->ws->cs_set_preamble(&ctx->gfx_cs, preamble->pm4, preamble->ndw,
+                               preamble != ctx->last_preamble);
+      ctx->last_preamble = preamble;
+   }
 
    if (ctx->queued.named.ls)
       ctx->prefetch_L2_mask |= SI_PREFETCH_LS;

@@ -143,17 +143,26 @@ deep_copy_vertex_input_state(void *mem_ctx,
       vk_foreach_struct(ext, src->pNext) {
          switch (ext->sType) {
          case VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT: {
-            VkPipelineVertexInputDivisorStateCreateInfoEXT *ext_src = (VkPipelineVertexInputDivisorStateCreateInfoEXT *)ext;
-            VkPipelineVertexInputDivisorStateCreateInfoEXT *ext_dst = ralloc(mem_ctx, VkPipelineVertexInputDivisorStateCreateInfoEXT);
-
+            const VkPipelineVertexInputDivisorStateCreateInfoEXT *ext_src = (VkPipelineVertexInputDivisorStateCreateInfoEXT *)ext;
+            unsigned n = ext_src->vertexBindingDivisorCount;
+            if (!n)
+               continue;
+            size_t offset = sizeof(VkPipelineVertexInputDivisorStateCreateInfoEXT);
+            char *p = (char *) ralloc_size(mem_ctx, offset + n * sizeof(VkVertexInputBindingDivisorDescriptionEXT));
+            if (!p)
+               return VK_ERROR_OUT_OF_HOST_MEMORY;
+            VkPipelineVertexInputDivisorStateCreateInfoEXT *ext_dst = (VkPipelineVertexInputDivisorStateCreateInfoEXT *)p;
+            VkVertexInputBindingDivisorDescriptionEXT *dst_divisors = (VkVertexInputBindingDivisorDescriptionEXT *)(p + offset);
             ext_dst->sType = ext_src->sType;
-            ext_dst->vertexBindingDivisorCount = ext_src->vertexBindingDivisorCount;
-
-            LVP_PIPELINE_DUP(ext_dst->pVertexBindingDivisors,
-                             ext_src->pVertexBindingDivisors,
-                             VkVertexInputBindingDivisorDescriptionEXT,
-                             ext_src->vertexBindingDivisorCount);
-
+            ext_dst->pNext = NULL;
+            ext_dst->vertexBindingDivisorCount = n;
+            ext_dst->pVertexBindingDivisors = dst_divisors;
+            const VkVertexInputBindingDivisorDescriptionEXT *src_divisors = ext_src->pVertexBindingDivisors;
+            for (unsigned i = 0; i < n; ++i) {
+               uint32_t d = src_divisors[i].divisor;
+               dst_divisors[i].divisor = d ? d : UINT32_MAX;
+               dst_divisors[i].binding = src_divisors[i].binding;
+            }
             dst->pNext = ext_dst;
             break;
          }
@@ -242,7 +251,8 @@ static VkResult
 deep_copy_dynamic_state(void *mem_ctx,
                         VkPipelineDynamicStateCreateInfo *dst,
                         const VkPipelineDynamicStateCreateInfo *src,
-                        VkGraphicsPipelineLibraryFlagsEXT stages)
+                        VkGraphicsPipelineLibraryFlagsEXT stages,
+                        bool has_depth, bool has_stencil)
 {
    dst->sType = src->sType;
    dst->pNext = NULL;
@@ -274,17 +284,21 @@ deep_copy_dynamic_state(void *mem_ctx,
 
       case VK_DYNAMIC_STATE_DEPTH_BIAS:
       case VK_DYNAMIC_STATE_DEPTH_BOUNDS:
-      case VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK:
-      case VK_DYNAMIC_STATE_STENCIL_WRITE_MASK:
-      case VK_DYNAMIC_STATE_STENCIL_REFERENCE:
       case VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE_EXT:
       case VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE_EXT:
       case VK_DYNAMIC_STATE_DEPTH_COMPARE_OP_EXT:
       case VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE_EXT:
       case VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE_EXT:
+         if (has_depth && (stages & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT))
+            states[dst->dynamicStateCount++] = src->pDynamicStates[i];
+         break;
+
+      case VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK:
+      case VK_DYNAMIC_STATE_STENCIL_WRITE_MASK:
+      case VK_DYNAMIC_STATE_STENCIL_REFERENCE:
       case VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE_EXT:
       case VK_DYNAMIC_STATE_STENCIL_OP_EXT:
-         if (stages & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT)
+         if (has_stencil && (stages & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT))
             states[dst->dynamicStateCount++] = src->pDynamicStates[i];
          break;
 
@@ -354,6 +368,12 @@ deep_copy_graphics_create_info(void *mem_ctx,
       dst->subpass = src->subpass;
       dst->renderPass = src->renderPass;
       rp_info = vk_get_pipeline_rendering_create_info(src);
+   }
+   bool has_depth = false;
+   bool has_stencil = false;
+   if (rp_info) {
+      has_depth = rp_info->depthAttachmentFormat != VK_FORMAT_UNDEFINED;
+      has_stencil = rp_info->stencilAttachmentFormat != VK_FORMAT_UNDEFINED;
    }
    dst->basePipelineHandle = src->basePipelineHandle;
    dst->basePipelineIndex = src->basePipelineIndex;
@@ -438,14 +458,41 @@ deep_copy_graphics_create_info(void *mem_ctx,
 
    if (shaders & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) {
       assert(rp_info);
+      bool have_output = (shaders & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT) > 0;
       /* pDepthStencilState */
       if (src->pDepthStencilState && !rasterization_disabled &&
-          (rp_info->depthAttachmentFormat != VK_FORMAT_UNDEFINED ||
-           rp_info->stencilAttachmentFormat != VK_FORMAT_UNDEFINED)) {
+          /*
+             VUID-VkGraphicsPipelineCreateInfo-renderPass-06053
+             * If renderPass is VK_NULL_HANDLE, the pipeline is being created with fragment shader
+               state and fragment output interface state, and either of
+               VkPipelineRenderingCreateInfo::depthAttachmentFormat
+               or
+               VkPipelineRenderingCreateInfo::stencilAttachmentFormat
+               are not VK_FORMAT_UNDEFINED, pDepthStencilState must be a valid pointer to a valid
+               VkPipelineDepthStencilStateCreateInfo structure
+
+             VUID-VkGraphicsPipelineCreateInfo-renderPass-06590
+             * If renderPass is VK_NULL_HANDLE and the pipeline is being created with fragment shader
+               state but not fragment output interface state, pDepthStencilState must be a valid pointer
+               to a valid VkPipelineDepthStencilStateCreateInfo structure
+          */
+          (!have_output || has_depth || has_stencil)) {
          LVP_PIPELINE_DUP(dst->pDepthStencilState,
                           src->pDepthStencilState,
                           VkPipelineDepthStencilStateCreateInfo,
                           1);
+         VkPipelineDepthStencilStateCreateInfo *pDepthStencilState = (void*)dst->pDepthStencilState;
+         if (!has_depth) {
+            pDepthStencilState->depthTestEnable = VK_FALSE;
+            pDepthStencilState->depthWriteEnable = VK_FALSE;
+            pDepthStencilState->depthCompareOp = VK_COMPARE_OP_ALWAYS;
+            pDepthStencilState->depthBoundsTestEnable = VK_FALSE;
+         }
+         if (!has_stencil) {
+            pDepthStencilState->stencilTestEnable = VK_FALSE;
+            memset(&pDepthStencilState->front, 0, sizeof(VkStencilOpState));
+            memset(&pDepthStencilState->back, 0, sizeof(VkStencilOpState));
+         }
       } else
          dst->pDepthStencilState = NULL;
    }
@@ -517,7 +564,7 @@ deep_copy_graphics_create_info(void *mem_ctx,
       }
       if (!dyn_state || !dyn_state->pDynamicStates)
          return VK_ERROR_OUT_OF_HOST_MEMORY;
-      deep_copy_dynamic_state(mem_ctx, dyn_state, src->pDynamicState, shaders);
+      deep_copy_dynamic_state(mem_ctx, dyn_state, src->pDynamicState, shaders, has_depth, has_stencil);
       dst->pDynamicState = dyn_state;
    } else
       dst->pDynamicState = NULL;

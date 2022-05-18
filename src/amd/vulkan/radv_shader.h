@@ -39,6 +39,8 @@
 #include "vulkan/runtime/vk_shader_module.h"
 #include "vulkan/vulkan.h"
 
+#include "aco_shader_info.h"
+
 #define RADV_VERT_ATTRIB_MAX MAX2(VERT_ATTRIB_MAX, VERT_ATTRIB_GENERIC0 + MAX_VERTEX_ATTRIBS)
 
 struct radv_physical_device;
@@ -112,11 +114,6 @@ struct radv_pipeline_key {
    } cs;
 };
 
-enum radv_compiler_debug_level {
-   RADV_COMPILER_DEBUG_LEVEL_PERFWARN,
-   RADV_COMPILER_DEBUG_LEVEL_ERROR,
-};
-
 struct radv_nir_compiler_options {
    struct radv_pipeline_key key;
    bool robust_buffer_access;
@@ -130,11 +127,11 @@ struct radv_nir_compiler_options {
    bool wgp_mode;
    enum radeon_family family;
    enum amd_gfx_level gfx_level;
-   const struct radeon_info *info;
    uint32_t address32_hi;
+   bool has_3d_cube_border_color_mipmap;
 
    struct {
-      void (*func)(void *private_data, enum radv_compiler_debug_level level, const char *message);
+      void (*func)(void *private_data, enum aco_compiler_debug_level level, const char *message);
       void *private_data;
    } debug;
 };
@@ -524,13 +521,13 @@ void radv_nir_apply_pipeline_layout(nir_shader *shader, struct radv_device *devi
 
 struct radv_pipeline_stage;
 
-nir_shader *radv_shader_compile_to_nir(struct radv_device *device,
-                                       const struct radv_pipeline_stage *stage,
-                                       const struct radv_pipeline_key *key);
+nir_shader *radv_shader_spirv_to_nir(struct radv_device *device,
+                                     const struct radv_pipeline_stage *stage,
+                                     const struct radv_pipeline_key *key);
 
 void radv_nir_lower_abi(nir_shader *shader, enum amd_gfx_level gfx_level,
                         const struct radv_shader_info *info, const struct radv_shader_args *args,
-                        const struct radv_pipeline_key *pl_key);
+                        const struct radv_pipeline_key *pl_key, bool use_llvm);
 
 void radv_init_shader_arenas(struct radv_device *device);
 void radv_destroy_shader_arenas(struct radv_device *device);
@@ -550,7 +547,7 @@ struct radv_shader *radv_shader_create(struct radv_device *device,
                                        const struct radv_shader_binary *binary,
                                        bool keep_shader_info, bool from_cache,
                                        const struct radv_shader_args *args);
-struct radv_shader *radv_shader_compile(
+struct radv_shader *radv_shader_nir_to_asm(
    struct radv_device *device, struct radv_pipeline_stage *stage, struct nir_shader *const *shaders,
    int shader_count, const struct radv_pipeline_key *key, bool keep_shader_info, bool keep_statistic_info,
    struct radv_shader_binary **binary_out);

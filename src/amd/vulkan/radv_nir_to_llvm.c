@@ -2014,10 +2014,18 @@ declare_esgs_ring(struct radv_shader_context *ctx)
 
 static LLVMValueRef radv_intrinsic_load(struct ac_shader_abi *abi, nir_intrinsic_op op)
 {
+   struct radv_shader_context *ctx = radv_shader_context_from_abi(abi);
+
    switch (op) {
    case nir_intrinsic_load_base_vertex:
    case nir_intrinsic_load_first_vertex:
       return radv_load_base_vertex(abi, op == nir_intrinsic_load_base_vertex);
+   case nir_intrinsic_load_ring_tess_factors_amd:
+      return ctx->hs_ring_tess_factor;
+   case nir_intrinsic_load_ring_tess_offchip_amd:
+      return ctx->hs_ring_tess_offchip;
+   case nir_intrinsic_load_ring_esgs_amd:
+      return ctx->esgs_ring;
    default:
       return NULL;
    }
@@ -2041,7 +2049,8 @@ ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
       float_mode = AC_FLOAT_MODE_DENORM_FLUSH_TO_ZERO;
    }
 
-   ac_llvm_context_init(&ctx.ac, ac_llvm, options->gfx_level, options->family, options->info,
+   ac_llvm_context_init(&ctx.ac, ac_llvm, options->gfx_level, options->family,
+                        options->has_3d_cube_border_color_mipmap,
                         float_mode, info->wave_size, info->ballot_bit_size);
    ctx.context = ctx.ac.context;
 
@@ -2426,7 +2435,8 @@ radv_compile_gs_copy_shader(struct ac_llvm_compiler *ac_llvm,
 
    assert(args->is_gs_copy_shader);
 
-   ac_llvm_context_init(&ctx.ac, ac_llvm, options->gfx_level, options->family, options->info,
+   ac_llvm_context_init(&ctx.ac, ac_llvm, options->gfx_level, options->family,
+                        options->has_3d_cube_border_color_mipmap,
                         AC_FLOAT_MODE_DEFAULT, 64, 64);
    ctx.context = ctx.ac.context;
 

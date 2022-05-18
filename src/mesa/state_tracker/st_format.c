@@ -111,19 +111,11 @@ st_mesa_format_to_pipe_format(const struct st_context *st,
 
    if (st_astc_format_fallback(st, mesaFormat)) {
       if (_mesa_is_format_srgb(mesaFormat)) {
-         if (st->transcode_astc_to_bptc)
-            return PIPE_FORMAT_BPTC_SRGBA;
-         else if (st->transcode_astc_to_dxt5)
-            return PIPE_FORMAT_DXT5_SRGBA;
-         else
-            return PIPE_FORMAT_R8G8B8A8_SRGB;
+         return st->transcode_astc ? PIPE_FORMAT_DXT5_SRGBA :
+                                     PIPE_FORMAT_R8G8B8A8_SRGB;
       } else {
-         if (st->transcode_astc_to_bptc)
-            return PIPE_FORMAT_BPTC_RGBA_UNORM;
-         else if (st->transcode_astc_to_dxt5)
-            return PIPE_FORMAT_DXT5_RGBA;
-         else
-            return PIPE_FORMAT_R8G8B8A8_UNORM;
+         return st->transcode_astc ? PIPE_FORMAT_DXT5_RGBA :
+                                     PIPE_FORMAT_R8G8B8A8_UNORM;
       }
    }
 
@@ -1138,8 +1130,8 @@ st_choose_format(struct st_context *st, GLenum internalFormat,
     */
    if (_mesa_is_enum_format_unsized(internalFormat) && format != 0 &&
        _mesa_is_type_unsigned(type)) {
-      pf = st_choose_matching_format(st, bindings, format, type, sample_count,
-                                     storage_sample_count, swap_bytes);
+      pf = st_choose_matching_format(st, bindings, format, type,
+                                     swap_bytes);
 
       if (pf != PIPE_FORMAT_NONE &&
           (!bindings || screen->is_format_supported(screen, pf, target, sample_count,
@@ -1236,15 +1228,12 @@ st_choose_matching_format_noverify(struct st_context *st,
  */
 enum pipe_format
 st_choose_matching_format(struct st_context *st, unsigned bind,
-                          GLenum format, GLenum type, unsigned num_samples,
-                          unsigned num_storage_samples, GLboolean swapBytes)
+                          GLenum format, GLenum type, GLboolean swapBytes)
 {
    struct pipe_screen *screen = st->screen;
    enum pipe_format pformat = st_choose_matching_format_noverify(st, format, type, swapBytes);
    if (pformat != PIPE_FORMAT_NONE &&
-       (!bind || screen->is_format_supported(screen, pformat, PIPE_TEXTURE_2D,
-                                             num_samples, num_storage_samples,
-                                             bind)))
+       (!bind || screen->is_format_supported(screen, pformat, PIPE_TEXTURE_2D, 0, 0, bind)))
       return pformat;
 
    return PIPE_FORMAT_NONE;
@@ -1257,7 +1246,7 @@ st_choose_matching_format(struct st_context *st, unsigned bind,
 mesa_format
 st_ChooseTextureFormat(struct gl_context *ctx, GLenum target,
                        GLint internalFormat,
-                       GLenum format, GLenum type, unsigned samples)
+                       GLenum format, GLenum type)
 {
    struct st_context *st = st_context(ctx);
    enum pipe_format pFormat;
@@ -1323,7 +1312,6 @@ st_ChooseTextureFormat(struct gl_context *ctx, GLenum target,
        */
       if (iformat == baseFormat && iformat == basePackFormat) {
          pFormat = st_choose_matching_format(st, bindings, format, type,
-                                             samples, samples,
                                              ctx->Unpack.SwapBytes);
 
          if (pFormat != PIPE_FORMAT_NONE)
@@ -1334,7 +1322,7 @@ st_ChooseTextureFormat(struct gl_context *ctx, GLenum target,
              * target bindings.
              */
             pFormat = st_choose_matching_format(st, PIPE_BIND_SAMPLER_VIEW,
-                                                format, type, samples, samples,
+                                                format, type,
                                                 ctx->Unpack.SwapBytes);
             if (pFormat != PIPE_FORMAT_NONE)
                return st_pipe_format_to_mesa_format(pFormat);
@@ -1343,13 +1331,13 @@ st_ChooseTextureFormat(struct gl_context *ctx, GLenum target,
    }
 
    pFormat = st_choose_format(st, internalFormat, format, type,
-                              pTarget, samples, samples, bindings,
+                              pTarget, 0, 0, bindings,
                               ctx->Unpack.SwapBytes, true);
 
    if (pFormat == PIPE_FORMAT_NONE && !is_renderbuffer) {
       /* try choosing format again, this time without render target bindings */
       pFormat = st_choose_format(st, internalFormat, format, type,
-                                 pTarget, samples, samples, PIPE_BIND_SAMPLER_VIEW,
+                                 pTarget, 0, 0, PIPE_BIND_SAMPLER_VIEW,
                                  ctx->Unpack.SwapBytes, true);
    }
 
@@ -1483,8 +1471,7 @@ st_QueryInternalFormat(struct gl_context *ctx, GLenum target,
       break;
    }
    case GL_TEXTURE_REDUCTION_MODE_ARB: {
-      mesa_format format = st_ChooseTextureFormat(ctx, target, internalFormat,
-                                                  GL_NONE, GL_NONE, 0);
+      mesa_format format = st_ChooseTextureFormat(ctx, target, internalFormat, GL_NONE, GL_NONE);
       enum pipe_format pformat = st_mesa_format_to_pipe_format(st, format);
       struct pipe_screen *screen = st->screen;
       params[0] = pformat != PIPE_FORMAT_NONE &&
@@ -1499,8 +1486,7 @@ st_QueryInternalFormat(struct gl_context *ctx, GLenum target,
       /* this is used only for passing CTS */
       if (target == GL_RENDERBUFFER)
          target = GL_TEXTURE_2D;
-      mesa_format format = st_ChooseTextureFormat(ctx, target, internalFormat,
-                                                  GL_NONE, GL_NONE, 0);
+      mesa_format format = st_ChooseTextureFormat(ctx, target, internalFormat, GL_NONE, GL_NONE);
       enum pipe_format pformat = st_mesa_format_to_pipe_format(st, format);
 
       if (pformat != PIPE_FORMAT_NONE) {

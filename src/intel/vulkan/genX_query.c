@@ -562,7 +562,7 @@ VkResult genX(GetQueryPoolResults)(
             const struct intel_perf_query_info *query = pool->pass_query[p];
             struct intel_perf_query_result result;
             intel_perf_query_result_clear(&result);
-            intel_perf_query_result_accumulate_fields(&result, query, &device->info,
+            intel_perf_query_result_accumulate_fields(&result, query,
                                                       pool->bo->map + khr_perf_query_data_offset(pool, firstQuery + i, p, false),
                                                       pool->bo->map + khr_perf_query_data_offset(pool, firstQuery + i, p, true),
                                                       false /* no_oa_accumulate */);
@@ -579,7 +579,7 @@ VkResult genX(GetQueryPoolResults)(
          const struct intel_perf_query_info *query = &device->physical->perf->queries[0];
          struct intel_perf_query_result result;
          intel_perf_query_result_clear(&result);
-         intel_perf_query_result_accumulate_fields(&result, query, &device->info,
+         intel_perf_query_result_accumulate_fields(&result, query,
                                                    query_data + intel_perf_query_data_offset(pool, false),
                                                    query_data + intel_perf_query_data_offset(pool, true),
                                                    false /* no_oa_accumulate */);
@@ -884,6 +884,7 @@ emit_perf_intel_query(struct anv_cmd_buffer *cmd_buffer,
 
       case INTEL_PERF_QUERY_FIELD_TYPE_SRM_PERFCNT:
       case INTEL_PERF_QUERY_FIELD_TYPE_SRM_RPSTAT:
+      case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_A:
       case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_B:
       case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_C: {
          struct anv_address addr = anv_address_add(data_addr, field->location);
@@ -1042,6 +1043,7 @@ void genX(CmdBeginQueryIndexedEXT)(
 
          case INTEL_PERF_QUERY_FIELD_TYPE_SRM_PERFCNT:
          case INTEL_PERF_QUERY_FIELD_TYPE_SRM_RPSTAT:
+         case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_A:
          case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_B:
          case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_C:
             dws =
@@ -1193,6 +1195,7 @@ void genX(CmdEndQueryIndexedEXT)(
 
          case INTEL_PERF_QUERY_FIELD_TYPE_SRM_PERFCNT:
          case INTEL_PERF_QUERY_FIELD_TYPE_SRM_RPSTAT:
+         case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_A:
          case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_B:
          case INTEL_PERF_QUERY_FIELD_TYPE_SRM_OA_C:
             dws =

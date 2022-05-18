@@ -1161,9 +1161,13 @@ radv_emit_rbplus_state(struct radv_cmd_buffer *cmd_buffer)
       if (cmd_buffer->state.attachments) {
          struct radv_color_buffer_info *cb = &cmd_buffer->state.attachments[idx].cb;
 
-         format = G_028C70_FORMAT_GFX6(cb->cb_color_info);
+         format = cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX11
+                     ? G_028C70_FORMAT_GFX11(cb->cb_color_info)
+                     : G_028C70_FORMAT_GFX6(cb->cb_color_info);
          swap = G_028C70_COMP_SWAP(cb->cb_color_info);
-         has_alpha = !G_028C74_FORCE_DST_ALPHA_1_GFX6(cb->cb_color_attrib);
+         has_alpha = cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX11
+                        ? !G_028C74_FORCE_DST_ALPHA_1_GFX11(cb->cb_color_attrib)
+                        : !G_028C74_FORCE_DST_ALPHA_1_GFX6(cb->cb_color_attrib);
       } else {
          VkFormat fmt = cmd_buffer->state.pass->attachments[idx].format;
          format = radv_translate_colorformat(fmt);
@@ -1706,7 +1710,10 @@ radv_emit_primitive_restart_enable(struct radv_cmd_buffer *cmd_buffer)
 {
    struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
 
-   if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX9) {
+   if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX11) {
+      radeon_set_uconfig_reg(cmd_buffer->cs, R_03092C_GE_MULTI_PRIM_IB_RESET_EN,
+                             d->primitive_restart_enable);
+   } else if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX9) {
       radeon_set_uconfig_reg(cmd_buffer->cs, R_03092C_VGT_MULTI_PRIM_IB_RESET_EN,
                              d->primitive_restart_enable);
    } else {
@@ -1759,7 +1766,7 @@ radv_emit_fb_color_state(struct radv_cmd_buffer *cmd_buffer, int index,
    struct radv_image *image = iview->image;
 
    if (!radv_layout_dcc_compressed(
-          cmd_buffer->device, image, iview->base_mip, layout, in_render_loop,
+          cmd_buffer->device, image, iview->vk.base_mip_level, layout, in_render_loop,
           radv_image_queue_family_mask(image, cmd_buffer->qf,
                                        cmd_buffer->qf))) {
       cb_color_info &= C_028C70_DCC_ENABLE;
@@ -1851,11 +1858,11 @@ radv_emit_fb_color_state(struct radv_cmd_buffer *cmd_buffer, int index,
    if (G_028C70_DCC_ENABLE(cb_color_info)) {
       /* Drawing with DCC enabled also compresses colorbuffers. */
       VkImageSubresourceRange range = {
-         .aspectMask = iview->aspect_mask,
-         .baseMipLevel = iview->base_mip,
-         .levelCount = iview->level_count,
-         .baseArrayLayer = iview->base_layer,
-         .layerCount = iview->layer_count,
+         .aspectMask = iview->vk.aspects,
+         .baseMipLevel = iview->vk.base_mip_level,
+         .levelCount = iview->vk.level_count,
+         .baseArrayLayer = iview->vk.base_array_layer,
+         .layerCount = iview->vk.layer_count,
       };
 
       radv_update_dcc_metadata(cmd_buffer, image, &range, true);
@@ -1895,7 +1902,7 @@ radv_update_zrange_precision(struct radv_cmd_buffer *cmd_buffer, struct radv_ds_
     * SET_CONTEXT_REG packet.
     */
    if (requires_cond_exec) {
-      uint64_t va = radv_get_tc_compat_zrange_va(image, iview->base_mip);
+      uint64_t va = radv_get_tc_compat_zrange_va(image, iview->vk.base_mip_level);
 
       radeon_emit(cmd_buffer->cs, PKT3(PKT3_COND_EXEC, 3, 0));
       radeon_emit(cmd_buffer->cs, va);
@@ -1936,8 +1943,12 @@ radv_emit_fb_ds_state(struct radv_cmd_buffer *cmd_buffer, struct radv_ds_buffer_
       radeon_set_context_reg(cmd_buffer->cs, R_028014_DB_HTILE_DATA_BASE, ds->db_htile_data_base);
       radeon_set_context_reg(cmd_buffer->cs, R_02801C_DB_DEPTH_SIZE_XY, ds->db_depth_size);
 
-      radeon_set_context_reg_seq(cmd_buffer->cs, R_02803C_DB_DEPTH_INFO, 7);
-      radeon_emit(cmd_buffer->cs, S_02803C_RESOURCE_LEVEL(1));
+      if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX11) {
+         radeon_set_context_reg_seq(cmd_buffer->cs, R_028040_DB_Z_INFO, 6);
+      } else {
+         radeon_set_context_reg_seq(cmd_buffer->cs, R_02803C_DB_DEPTH_INFO, 7);
+         radeon_emit(cmd_buffer->cs, S_02803C_RESOURCE_LEVEL(1));
+      }
       radeon_emit(cmd_buffer->cs, db_z_info);
       radeon_emit(cmd_buffer->cs, db_stencil_info);
       radeon_emit(cmd_buffer->cs, ds->db_z_read_base);
@@ -2125,11 +2136,11 @@ radv_update_tc_compat_zrange_metadata(struct radv_cmd_buffer *cmd_buffer,
                                       VkClearDepthStencilValue ds_clear_value)
 {
    VkImageSubresourceRange range = {
-      .aspectMask = iview->aspect_mask,
-      .baseMipLevel = iview->base_mip,
-      .levelCount = iview->level_count,
-      .baseArrayLayer = iview->base_layer,
-      .layerCount = iview->layer_count,
+      .aspectMask = iview->vk.aspects,
+      .baseMipLevel = iview->vk.base_mip_level,
+      .levelCount = iview->vk.level_count,
+      .baseArrayLayer = iview->vk.base_array_layer,
+      .layerCount = iview->vk.layer_count,
    };
    uint32_t cond_val;
 
@@ -2150,11 +2161,11 @@ radv_update_ds_clear_metadata(struct radv_cmd_buffer *cmd_buffer,
                               VkClearDepthStencilValue ds_clear_value, VkImageAspectFlags aspects)
 {
    VkImageSubresourceRange range = {
-      .aspectMask = iview->aspect_mask,
-      .baseMipLevel = iview->base_mip,
-      .levelCount = iview->level_count,
-      .baseArrayLayer = iview->base_layer,
-      .layerCount = iview->layer_count,
+      .aspectMask = iview->vk.aspects,
+      .baseMipLevel = iview->vk.base_mip_level,
+      .levelCount = iview->vk.level_count,
+      .baseArrayLayer = iview->vk.base_array_layer,
+      .layerCount = iview->vk.layer_count,
    };
    struct radv_image *image = iview->image;
 
@@ -2177,8 +2188,8 @@ radv_load_ds_clear_metadata(struct radv_cmd_buffer *cmd_buffer, const struct rad
 {
    struct radeon_cmdbuf *cs = cmd_buffer->cs;
    const struct radv_image *image = iview->image;
-   VkImageAspectFlags aspects = vk_format_aspects(image->vk_format);
-   uint64_t va = radv_get_ds_clear_value_va(image, iview->base_mip);
+   VkImageAspectFlags aspects = vk_format_aspects(image->vk.format);
+   uint64_t va = radv_get_ds_clear_value_va(image, iview->vk.base_mip_level);
    unsigned reg_offset = 0, reg_count = 0;
 
    assert(radv_image_has_htile(image));
@@ -2341,14 +2352,14 @@ radv_update_color_clear_metadata(struct radv_cmd_buffer *cmd_buffer,
 {
    struct radv_image *image = iview->image;
    VkImageSubresourceRange range = {
-      .aspectMask = iview->aspect_mask,
-      .baseMipLevel = iview->base_mip,
-      .levelCount = iview->level_count,
-      .baseArrayLayer = iview->base_layer,
-      .layerCount = iview->layer_count,
+      .aspectMask = iview->vk.aspects,
+      .baseMipLevel = iview->vk.base_mip_level,
+      .levelCount = iview->vk.level_count,
+      .baseArrayLayer = iview->vk.base_array_layer,
+      .layerCount = iview->vk.layer_count,
    };
 
-   assert(radv_image_has_cmask(image) || radv_dcc_enabled(image, iview->base_mip));
+   assert(radv_image_has_cmask(image) || radv_dcc_enabled(image, iview->vk.base_mip_level));
 
    /* Do not need to update the clear value for images that are fast cleared with the comp-to-single
     * mode because the hardware gets the value from the image directly.
@@ -2371,7 +2382,7 @@ radv_load_color_clear_metadata(struct radv_cmd_buffer *cmd_buffer, struct radv_i
    struct radeon_cmdbuf *cs = cmd_buffer->cs;
    struct radv_image *image = iview->image;
 
-   if (!radv_image_has_cmask(image) && !radv_dcc_enabled(image, iview->base_mip))
+   if (!radv_image_has_cmask(image) && !radv_dcc_enabled(image, iview->vk.base_mip_level))
       return;
 
    if (iview->image->support_comp_to_single)
@@ -2383,7 +2394,7 @@ radv_load_color_clear_metadata(struct radv_cmd_buffer *cmd_buffer, struct radv_i
       return;
    }
 
-   uint64_t va = radv_image_get_fast_clear_va(image, iview->base_mip);
+   uint64_t va = radv_image_get_fast_clear_va(image, iview->vk.base_mip_level);
    uint32_t reg = R_028C8C_CB_COLOR0_CLEAR_WORD0 + cb_idx * 0x3c;
 
    if (cmd_buffer->device->physical_device->rad_info.has_load_ctx_reg_pkt) {
@@ -2434,12 +2445,12 @@ radv_emit_fb_mip_change_flush(struct radv_cmd_buffer *cmd_buffer)
       struct radv_image_view *iview = cmd_buffer->state.attachments[idx].iview;
 
       if ((radv_image_has_CB_metadata(iview->image) ||
-           radv_dcc_enabled(iview->image, iview->base_mip) ||
+           radv_dcc_enabled(iview->image, iview->vk.base_mip_level) ||
            radv_dcc_enabled(iview->image, cmd_buffer->state.cb_mip[i])) &&
-          cmd_buffer->state.cb_mip[i] != iview->base_mip)
+          cmd_buffer->state.cb_mip[i] != iview->vk.base_mip_level)
          color_mip_changed = true;
 
-      cmd_buffer->state.cb_mip[i] = iview->base_mip;
+      cmd_buffer->state.cb_mip[i] = iview->vk.base_mip_level;
    }
 
    if (color_mip_changed) {
@@ -2516,8 +2527,8 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
 
       radv_cs_add_buffer(cmd_buffer->device->ws, cmd_buffer->cs, iview->image->bo);
 
-      assert(iview->aspect_mask & (VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_PLANE_0_BIT |
-                                   VK_IMAGE_ASPECT_PLANE_1_BIT | VK_IMAGE_ASPECT_PLANE_2_BIT));
+      assert(iview->vk.aspects & (VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_PLANE_0_BIT |
+                                  VK_IMAGE_ASPECT_PLANE_1_BIT | VK_IMAGE_ASPECT_PLANE_2_BIT));
       radv_emit_fb_color_state(cmd_buffer, i, &cmd_buffer->state.attachments[idx].cb, iview, layout,
                                in_render_loop);
 
@@ -2572,7 +2583,7 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
                               .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
                               .image = radv_image_to_handle(image),
                               .viewType = radv_meta_get_view_type(image),
-                              .format = image->vk_format,
+                              .format = image->vk.format,
                               .subresourceRange =
                                  {
                                     .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
@@ -2609,12 +2620,11 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
       enum amd_gfx_level gfx_level = cmd_buffer->device->physical_device->rad_info.gfx_level;
       uint8_t watermark = gfx_level >= GFX10 ? 6 : 4;
 
-      radeon_set_context_reg(
-         cmd_buffer->cs, R_028424_CB_DCC_CONTROL,
-         S_028424_OVERWRITE_COMBINER_MRT_SHARING_DISABLE(gfx_level <= GFX9) |
-            S_028424_OVERWRITE_COMBINER_WATERMARK(watermark) |
-            S_028424_DISABLE_CONSTANT_ENCODE_AC01(disable_constant_encode_ac01) |
-            S_028424_DISABLE_CONSTANT_ENCODE_REG(disable_constant_encode));
+      radeon_set_context_reg(cmd_buffer->cs, R_028424_CB_DCC_CONTROL,
+                             S_028424_OVERWRITE_COMBINER_MRT_SHARING_DISABLE(gfx_level <= GFX9) |
+                                S_028424_OVERWRITE_COMBINER_WATERMARK(watermark) |
+                                S_028424_DISABLE_CONSTANT_ENCODE_AC01(disable_constant_encode_ac01) |
+                                S_028424_DISABLE_CONSTANT_ENCODE_REG(gfx_level < GFX11 && disable_constant_encode));
    }
 
    cmd_buffer->state.dirty &= ~RADV_CMD_DIRTY_FRAMEBUFFER;
@@ -3499,7 +3509,7 @@ radv_flush_vertex_descriptors(struct radv_cmd_buffer *cmd_buffer, bool pipeline_
              * - 3: offset >= NUM_RECORDS (Raw)
              */
             int oob_select = stride ? V_008F0C_OOB_SELECT_STRUCTURED : V_008F0C_OOB_SELECT_RAW;
-            rsrc_word3 |= S_008F0C_OOB_SELECT(oob_select) | S_008F0C_RESOURCE_LEVEL(1);
+            rsrc_word3 |= S_008F0C_OOB_SELECT(oob_select) | S_008F0C_RESOURCE_LEVEL(chip < GFX11);
          }
 
          desc[0] = va;
@@ -3599,7 +3609,10 @@ radv_flush_streamout_descriptors(struct radv_cmd_buffer *cmd_buffer)
             S_008F0C_DST_SEL_X(V_008F0C_SQ_SEL_X) | S_008F0C_DST_SEL_Y(V_008F0C_SQ_SEL_Y) |
             S_008F0C_DST_SEL_Z(V_008F0C_SQ_SEL_Z) | S_008F0C_DST_SEL_W(V_008F0C_SQ_SEL_W);
 
-         if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX10) {
+         if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX11) {
+            rsrc_word3 |= S_008F0C_FORMAT(V_008F0C_GFX11_FORMAT_32_FLOAT) |
+                          S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_RAW);
+         } else if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX10) {
             rsrc_word3 |= S_008F0C_FORMAT(V_008F0C_GFX10_FORMAT_32_FLOAT) |
                           S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_RAW) | S_008F0C_RESOURCE_LEVEL(1);
          } else {
@@ -3962,8 +3975,8 @@ radv_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkAccessFlags2 src_fla
          /* since the STORAGE bit isn't set we know that this is a meta operation.
           * on the dst flush side we skip CB/DB flushes without the STORAGE bit, so
           * set it here. */
-         if (image && !(image->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
-            if (vk_format_is_depth_or_stencil(image->vk_format)) {
+         if (image && !(image->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+            if (vk_format_is_depth_or_stencil(image->vk.format)) {
                flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_DB;
             } else {
                flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_CB;
@@ -4029,7 +4042,7 @@ radv_dst_access_flush(struct radv_cmd_buffer *cmd_buffer, VkAccessFlags2 dst_fla
    bool image_is_coherent = image ? image->l2_coherent : false;
 
    if (image) {
-      if (!(image->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+      if (!(image->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
          flush_CB = false;
          flush_DB = false;
       }
@@ -4211,10 +4224,10 @@ radv_handle_subpass_image_transition(struct radv_cmd_buffer *cmd_buffer,
    struct radv_image_view *view = cmd_buffer->state.attachments[idx].iview;
    struct radv_sample_locations_state *sample_locs;
    VkImageSubresourceRange range;
-   range.aspectMask = view->aspect_mask;
-   range.baseMipLevel = view->base_mip;
+   range.aspectMask = view->vk.aspects;
+   range.baseMipLevel = view->vk.base_mip_level;
    range.levelCount = 1;
-   range.baseArrayLayer = view->base_layer;
+   range.baseArrayLayer = view->vk.base_array_layer;
    range.layerCount = cmd_buffer->state.framebuffer->layers;
 
    if (cmd_buffer->state.subpass->view_mask) {
@@ -4299,7 +4312,7 @@ radv_cmd_state_setup_sample_locations(struct radv_cmd_buffer *cmd_buffer,
       uint32_t att_idx = att_sample_locs->attachmentIndex;
       struct radv_image *image = cmd_buffer->state.attachments[att_idx].iview->image;
 
-      assert(vk_format_is_depth_or_stencil(image->vk_format));
+      assert(vk_format_is_depth_or_stencil(image->vk.format));
 
       /* From the Vulkan spec 1.1.108:
        *
@@ -4309,7 +4322,7 @@ radv_cmd_state_setup_sample_locations(struct radv_cmd_buffer *cmd_buffer,
        *  then the values specified in sampleLocationsInfo are
        *  ignored."
        */
-      if (!(image->flags & VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT))
+      if (!(image->vk.create_flags & VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT))
          continue;
 
       const VkSampleLocationsInfoEXT *sample_locs_info = &att_sample_locs->sampleLocationsInfo;
@@ -4422,7 +4435,7 @@ radv_cmd_state_setup_attachments(struct radv_cmd_buffer *cmd_buffer, struct radv
       }
 
       state->attachments[i].iview = iview;
-      if (iview->aspect_mask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+      if (iview->vk.aspects & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
          radv_initialise_ds_surface(cmd_buffer->device, &state->attachments[i].ds, iview);
       } else {
          radv_initialise_color_surface(cmd_buffer->device, &state->attachments[i].cb, iview);
@@ -4885,7 +4898,10 @@ radv_CmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint pi
             dst[3] = S_008F0C_DST_SEL_X(V_008F0C_SQ_SEL_X) | S_008F0C_DST_SEL_Y(V_008F0C_SQ_SEL_Y) |
                      S_008F0C_DST_SEL_Z(V_008F0C_SQ_SEL_Z) | S_008F0C_DST_SEL_W(V_008F0C_SQ_SEL_W);
 
-            if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX10) {
+            if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX11) {
+               dst[3] |= S_008F0C_FORMAT(V_008F0C_GFX11_FORMAT_32_FLOAT) |
+                         S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_RAW);
+            } else if (cmd_buffer->device->physical_device->rad_info.gfx_level >= GFX10) {
                dst[3] |= S_008F0C_FORMAT(V_008F0C_GFX10_FORMAT_32_FLOAT) |
                          S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_RAW) | S_008F0C_RESOURCE_LEVEL(1);
             } else {
@@ -5928,7 +5944,7 @@ radv_cmd_buffer_begin_subpass(struct radv_cmd_buffer *cmd_buffer, uint32_t subpa
          int ds_idx = subpass->depth_stencil_attachment->attachment;
          struct radv_image_view *ds_iview = cmd_buffer->state.attachments[ds_idx].iview;
          struct radv_image *ds_image = ds_iview->image;
-         uint32_t level = ds_iview->base_mip;
+         uint32_t level = ds_iview->vk.base_mip_level;
 
          VkExtent2D extent = {
             .width = radv_minify(ds_image->info.width, level),
@@ -7794,7 +7810,7 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
       color_refs[i] = (VkAttachmentReference2){.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
                                                .attachment = att_count,
                                                .layout = info->imageLayout,
-                                               .aspectMask = iview->aspect_mask};
+                                               .aspectMask = iview->vk.aspects};
 
       iviews[att_count] = info->imageView;
       clear_values[att_count] = info->clearValue;
@@ -7802,7 +7818,7 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
 
       memset(att, 0, sizeof(*att));
       att->sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
-      att->format = iview->vk_format;
+      att->format = iview->vk.format;
       att->samples = iview->image->info.samples;
       att->loadOp = info->loadOp;
       att->storeOp = info->storeOp;
@@ -7822,14 +7838,14 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
             (VkAttachmentReference2){.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
                                      .attachment = att_count,
                                      .layout = info->resolveImageLayout,
-                                     .aspectMask = resolve_iview->aspect_mask};
+                                     .aspectMask = resolve_iview->vk.aspects};
 
          iviews[att_count] = info->resolveImageView;
          att = att_desc + att_count++;
 
          memset(att, 0, sizeof(*att));
          att->sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
-         att->format = resolve_iview->vk_format;
+         att->format = resolve_iview->vk.format;
          att->samples = resolve_iview->image->info.samples;
          att->loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
          att->storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -7864,7 +7880,7 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
 
          memset(att, 0, sizeof(*att));
          att->sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
-         att->format = iview->vk_format;
+         att->format = iview->vk.format;
          att->samples = iview->image->info.samples;
 
          if (pRenderingInfo->pDepthAttachment) {
@@ -7920,14 +7936,14 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
                (VkAttachmentReference2){.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
                                         .attachment = att_count,
                                         .layout = common_info->resolveImageLayout,
-                                        .aspectMask = resolve_iview->aspect_mask};
+                                        .aspectMask = resolve_iview->vk.aspects};
 
             iviews[att_count] = common_info->resolveImageView;
             att = att_desc + att_count++;
 
             memset(att, 0, sizeof(*att));
             att->sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
-            att->format = resolve_iview->vk_format;
+            att->format = resolve_iview->vk.format;
             att->samples = resolve_iview->image->info.samples;
             att->loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             att->storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -7974,14 +7990,14 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
       vrs_ref = (VkAttachmentReference2){.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
                                          .attachment = att_count,
                                          .layout = vrs_info->imageLayout,
-                                         .aspectMask = iview->aspect_mask};
+                                         .aspectMask = iview->vk.aspects};
 
       iviews[att_count] = vrs_info->imageView;
       VkAttachmentDescription2 *att = att_desc + att_count++;
 
       memset(att, 0, sizeof(*att));
       att->sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
-      att->format = iview->vk_format;
+      att->format = iview->vk.format;
       att->samples = iview->image->info.samples;
       att->loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
       att->storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -8215,7 +8231,8 @@ radv_init_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
       /* Initialize the mipmap levels without DCC. */
       if (size != image->planes[0].surface.meta_size) {
          flush_bits |= radv_fill_buffer(cmd_buffer, image, image->bo,
-                                        image->offset + image->planes[0].surface.meta_offset + size,
+                                        radv_buffer_get_va(image->bo) + image->offset +
+                                           image->planes[0].surface.meta_offset + size,
                                         image->planes[0].surface.meta_size - size, 0xffffffff);
       }
    }
@@ -8294,7 +8311,7 @@ radv_retile_transition(struct radv_cmd_buffer *cmd_buffer, struct radv_image *im
                        VkImageLayout src_layout, VkImageLayout dst_layout, unsigned dst_queue_mask)
 {
    /* If the image is read-only, we don't have to retile DCC because it can't change. */
-   if (!(image->usage & RADV_IMAGE_USAGE_WRITE_BITS))
+   if (!(image->vk.usage & RADV_IMAGE_USAGE_WRITE_BITS))
       return;
 
    if (src_layout != VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
@@ -8366,7 +8383,7 @@ radv_handle_color_image_transition(struct radv_cmd_buffer *cmd_buffer, struct ra
 
    /* MSAA color decompress. */
    if (radv_image_has_fmask(image) &&
-       (image->usage & (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) &&
+       (image->vk.usage & (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) &&
        radv_layout_fmask_compressed(cmd_buffer->device, image, src_layout, src_queue_mask) &&
        !radv_layout_fmask_compressed(cmd_buffer->device, image, dst_layout, dst_queue_mask)) {
       if (radv_dcc_enabled(image, range->baseMipLevel) &&
@@ -8428,7 +8445,7 @@ radv_handle_image_transition(struct radv_cmd_buffer *cmd_buffer, struct radv_ima
    if (src_layout == dst_layout && src_render_loop == dst_render_loop && src_queue_mask == dst_queue_mask)
       return;
 
-   if (vk_format_has_depth(image->vk_format)) {
+   if (vk_format_has_depth(image->vk.format)) {
       radv_handle_depth_image_transition(cmd_buffer, image, src_layout, src_render_loop, dst_layout,
                                          dst_render_loop, src_queue_mask, dst_queue_mask, range,
                                          sample_locs);
@@ -8504,7 +8521,7 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, const VkDependencyInfo *dep_inf
       struct radv_sample_locations_state sample_locations;
 
       if (sample_locs_info) {
-         assert(image->flags & VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT);
+         assert(image->vk.create_flags & VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT);
          sample_locations.per_pixel = sample_locs_info->sampleLocationsPerPixel;
          sample_locations.grid_size = sample_locs_info->sampleLocationGridSize;
          sample_locations.count = sample_locs_info->sampleLocationsCount;

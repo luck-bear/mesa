@@ -57,7 +57,7 @@ struct ac_llvm_flow {
  */
 void ac_llvm_context_init(struct ac_llvm_context *ctx, struct ac_llvm_compiler *compiler,
                           enum amd_gfx_level gfx_level, enum radeon_family family,
-                          const struct radeon_info *info,
+                          bool has_3d_cube_border_color_mipmap,
                           enum ac_float_mode float_mode, unsigned wave_size,
                           unsigned ballot_mask_bits)
 {
@@ -65,7 +65,7 @@ void ac_llvm_context_init(struct ac_llvm_context *ctx, struct ac_llvm_compiler *
 
    ctx->gfx_level = gfx_level;
    ctx->family = family;
-   ctx->info = info;
+   ctx->has_3d_cube_border_color_mipmap = has_3d_cube_border_color_mipmap;
    ctx->wave_size = wave_size;
    ctx->ballot_mask_bits = ballot_mask_bits;
    ctx->float_mode = float_mode;
@@ -4290,11 +4290,12 @@ LLVMValueRef ac_build_call(struct ac_llvm_context *ctx, LLVMValueRef func, LLVMV
 }
 
 void ac_export_mrt_z(struct ac_llvm_context *ctx, LLVMValueRef depth, LLVMValueRef stencil,
-                     LLVMValueRef samplemask, LLVMValueRef mrtz_alpha, bool is_last,
+                     LLVMValueRef samplemask, LLVMValueRef mrt0_alpha, bool is_last,
                      struct ac_export_args *args)
 {
    unsigned mask = 0;
-   unsigned format = ac_get_spi_shader_z_format(depth != NULL, stencil != NULL, samplemask != NULL);
+   unsigned format = ac_get_spi_shader_z_format(depth != NULL, stencil != NULL, samplemask != NULL,
+                                                mrt0_alpha != NULL);
 
    assert(depth || stencil || samplemask);
 
@@ -4330,17 +4331,6 @@ void ac_export_mrt_z(struct ac_llvm_context *ctx, LLVMValueRef depth, LLVMValueR
          args->out[1] = samplemask;
          mask |= ctx->gfx_level >= GFX11 ? 0x2 : 0xc;
       }
-      if (mrtz_alpha) {
-         /* MRT0 alpha should be in Y[31:16] if alpha-to-coverage is enabled and MRTZ is present. */
-         assert(ctx->gfx_level >= GFX11);
-         mrtz_alpha = LLVMBuildFPTrunc(ctx->builder, mrtz_alpha, ctx->f16, "");
-         mrtz_alpha = ac_to_integer(ctx, mrtz_alpha);
-         mrtz_alpha = LLVMBuildZExt(ctx->builder, mrtz_alpha, ctx->i32, "");
-         mrtz_alpha = LLVMBuildShl(ctx->builder, mrtz_alpha, LLVMConstInt(ctx->i32, 16, 0), "");
-         args->out[1] = LLVMBuildOr(ctx->builder, ac_to_integer(ctx, args->out[1]), mrtz_alpha, "");
-         args->out[1] = ac_to_float(ctx, args->out[1]);
-         mask |= 0x2;
-      }
    } else {
       if (depth) {
          args->out[0] = depth;
@@ -4354,8 +4344,8 @@ void ac_export_mrt_z(struct ac_llvm_context *ctx, LLVMValueRef depth, LLVMValueR
          args->out[2] = samplemask;
          mask |= 0x4;
       }
-      if (mrtz_alpha) {
-         args->out[3] = mrtz_alpha;
+      if (mrt0_alpha) {
+         args->out[3] = mrt0_alpha;
          mask |= 0x8;
       }
    }

@@ -1608,7 +1608,7 @@ static LLVMValueRef build_tex_intrinsic(struct ac_nir_context *ctx, const nir_te
    }
 
    /* Aldebaran doesn't have image_sample_lz, but image_sample behaves like lz. */
-   if (!ctx->ac.info->has_3d_cube_border_color_mipmap)
+   if (!ctx->ac.has_3d_cube_border_color_mipmap)
       args->level_zero = false;
 
    if (instr->op == nir_texop_tg4 && ctx->ac.gfx_level <= GFX8 &&
@@ -3623,6 +3623,9 @@ static void visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *ins
    case nir_intrinsic_load_tess_level_inner_default:
    case nir_intrinsic_load_patch_vertices_in:
    case nir_intrinsic_load_sample_mask_in:
+   case nir_intrinsic_load_ring_tess_factors_amd:
+   case nir_intrinsic_load_ring_tess_offchip_amd:
+   case nir_intrinsic_load_ring_esgs_amd:
       result = ctx->abi->intrinsic_load(ctx->abi, instr->intrinsic);
       break;
    case nir_intrinsic_load_vertex_id:

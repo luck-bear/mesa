@@ -546,21 +546,13 @@ dri_fill_in_modes(struct dri_screen *screen)
          continue;
 
       for (i = 1; i <= msaa_samples_max; i++) {
-         /* The MSAA component order doesn't have to match the single-sample
-          * one. Allow the DRI frontend to swap channels for MSAA.
-          */
-         enum pipe_format swapped_format =
-            util_format_rgb_to_bgr(pipe_formats[format]);
          int samples = i > 1 ? i : 0;
 
          if (p_screen->is_format_supported(p_screen, pipe_formats[format],
                                            PIPE_TEXTURE_2D, samples, samples,
-                                           PIPE_BIND_RENDER_TARGET) ||
-             (swapped_format != PIPE_FORMAT_NONE &&
-              p_screen->is_format_supported(p_screen, swapped_format,
-                                            PIPE_TEXTURE_2D, samples, samples,
-                                            PIPE_BIND_RENDER_TARGET)))
+                                           PIPE_BIND_RENDER_TARGET)) {
             msaa_modes[num_msaa_modes++] = samples;
+         }
       }
 
       if (num_msaa_modes) {
@@ -771,14 +763,7 @@ static int
 dri_get_param(struct st_manager *smapi,
               enum st_manager_param param)
 {
-   struct dri_screen *screen = (struct dri_screen *)smapi;
-
-   switch(param) {
-   case ST_MANAGER_BROKEN_INVALIDATE:
-      return screen->broken_invalidate;
-   default:
-      return 0;
-   }
+   return 0;
 }
 
 void

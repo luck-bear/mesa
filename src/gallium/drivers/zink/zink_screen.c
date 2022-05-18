@@ -34,6 +34,7 @@
 #include "zink_instance.h"
 #include "zink_program.h"
 #include "zink_public.h"
+#include "zink_query.h"
 #include "zink_resource.h"
 #include "nir_to_spirv/nir_to_spirv.h" // for SPIRV_VERSION
 
@@ -77,6 +78,7 @@ zink_debug_options[] = {
    { "spirv", ZINK_DEBUG_SPIRV, "Dump SPIR-V during program compile" },
    { "tgsi", ZINK_DEBUG_TGSI, "Dump TGSI during program compile" },
    { "validation", ZINK_DEBUG_VALIDATION, "Dump Validation layer output" },
+   { "sync", ZINK_DEBUG_SYNC, "Force synchronization before draws/dispatches" },
    DEBUG_NAMED_VALUE_END
 };
 
@@ -186,7 +188,7 @@ disk_cache_init(struct zink_screen *screen)
 
    screen->disk_cache = disk_cache_create(buf, screen->info.props.deviceName, 0);
    if (!screen->disk_cache)
-      return false;
+      return true;
 
    if (!util_queue_init(&screen->cache_put_thread, "zcq", 8, 1, UTIL_QUEUE_INIT_RESIZE_IF_FULL, screen) ||
       !util_queue_init(&screen->cache_get_thread, "zcfq", 8, 4,
@@ -593,8 +595,7 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return screen->info.props.limits.minUniformBufferOffsetAlignment;
 
    case PIPE_CAP_QUERY_TIMESTAMP:
-      return screen->info.have_EXT_calibrated_timestamps &&
-             screen->timestamp_valid_bits > 0;
+      return screen->timestamp_valid_bits > 0;
 
    case PIPE_CAP_MIN_MAP_BUFFER_ALIGNMENT:
       return 1 << MIN_SLAB_ORDER;
@@ -1336,7 +1337,7 @@ choose_pdev(struct zink_screen *screen)
       }
    }
    is_cpu = cur_prio == prio_map[VK_PHYSICAL_DEVICE_TYPE_CPU];
-   if (cpu && !is_cpu)
+   if (cpu != is_cpu)
       goto out;
 
    screen->pdev = pdevs[idx];
@@ -1884,6 +1885,20 @@ zink_get_sparse_texture_virtual_page_size(struct pipe_screen *pscreen,
                                           int *x, int *y, int *z)
 {
    struct zink_screen *screen = zink_screen(pscreen);
+   static const int page_size_2d[][3] = {
+      { 256, 256, 1 }, /* 8bpp   */
+      { 256, 128, 1 }, /* 16bpp  */
+      { 128, 128, 1 }, /* 32bpp  */
+      { 128, 64,  1 }, /* 64bpp  */
+      { 64,  64,  1 }, /* 128bpp */
+   };
+   static const int page_size_3d[][3] = {
+      { 64,  32,  32 }, /* 8bpp   */
+      { 32,  32,  32 }, /* 16bpp  */
+      { 32,  32,  16 }, /* 32bpp  */
+      { 32,  16,  16 }, /* 64bpp  */
+      { 16,  16,  16 }, /* 128bpp */
+   };
    /* Only support one type of page size. */
    if (offset != 0)
       return 0;
@@ -1897,6 +1912,7 @@ zink_get_sparse_texture_virtual_page_size(struct pipe_screen *pscreen,
    VkImageType type;
    switch (target) {
    case PIPE_TEXTURE_1D:
+   case PIPE_TEXTURE_1D_ARRAY:
       type = (screen->need_2D_sparse || (screen->need_2D_zs && is_zs)) ? VK_IMAGE_TYPE_2D : VK_IMAGE_TYPE_1D;
       break;
 
@@ -1911,6 +1927,9 @@ zink_get_sparse_texture_virtual_page_size(struct pipe_screen *pscreen,
    case PIPE_TEXTURE_3D:
       type = VK_IMAGE_TYPE_3D;
       break;
+
+   case PIPE_BUFFER:
+      goto hack_it_up;
 
    default:
       return 0;
@@ -1928,30 +1947,7 @@ zink_get_sparse_texture_virtual_page_size(struct pipe_screen *pscreen,
    if (!prop_count) {
       if (pformat == PIPE_FORMAT_R9G9B9E5_FLOAT) {
          screen->faked_e5sparse = true;
-         static const int page_size_2d[][3] = {
-            { 256, 256, 1 }, /* 8bpp   */
-            { 256, 128, 1 }, /* 16bpp  */
-            { 128, 128, 1 }, /* 32bpp  */
-            { 128, 64,  1 }, /* 64bpp  */
-            { 64,  64,  1 }, /* 128bpp */
-         };
-         static const int page_size_3d[][3] = {
-            { 64,  32,  32 }, /* 8bpp   */
-            { 32,  32,  32 }, /* 16bpp  */
-            { 32,  32,  16 }, /* 32bpp  */
-            { 32,  16,  16 }, /* 64bpp  */
-            { 16,  16,  16 }, /* 128bpp */
-         };
-         const int (*page_sizes)[3] = target == PIPE_TEXTURE_3D ? page_size_3d : page_size_2d;
-         int blk_size = util_format_get_blocksize(pformat);
-
-         if (size) {
-            unsigned index = util_logbase2(blk_size);
-            if (x) *x = page_sizes[index][0];
-            if (y) *y = page_sizes[index][1];
-            if (z) *z = page_sizes[index][2];
-         }
-         return 1;
+         goto hack_it_up;
       }
       return 0;
    }
@@ -1965,6 +1961,19 @@ zink_get_sparse_texture_virtual_page_size(struct pipe_screen *pscreen,
          *z = props[0].imageGranularity.depth;
    }
 
+   return 1;
+hack_it_up:
+   {
+      const int (*page_sizes)[3] = target == PIPE_TEXTURE_3D ? page_size_3d : page_size_2d;
+      int blk_size = util_format_get_blocksize(pformat);
+
+      if (size) {
+         unsigned index = util_logbase2(blk_size);
+         if (x) *x = page_sizes[index][0];
+         if (y) *y = page_sizes[index][1];
+         if (z) *z = page_sizes[index][2];
+      }
+   }
    return 1;
 }
 
@@ -2196,6 +2205,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config)
    screen->base.get_vendor = zink_get_vendor;
    screen->base.get_device_vendor = zink_get_device_vendor;
    screen->base.get_compute_param = zink_get_compute_param;
+   screen->base.get_timestamp = zink_get_timestamp;
    screen->base.query_memory_info = zink_query_memory_info;
    screen->base.get_param = zink_get_param;
    screen->base.get_paramf = zink_get_paramf;

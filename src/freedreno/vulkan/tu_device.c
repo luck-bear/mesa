@@ -216,6 +216,8 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_image_robustness = true,
       .EXT_primitives_generated_query = true,
       .EXT_image_view_min_lod = true,
+      .EXT_pipeline_creation_feedback = true,
+      .EXT_pipeline_creation_cache_control = true,
 #ifndef TU_USE_KGSL
       .EXT_physical_device_drm = true,
 #endif
@@ -618,7 +620,7 @@ tu_get_physical_device_features_1_3(struct tu_physical_device *pdevice,
    features->robustImageAccess                   = true;
    features->inlineUniformBlock                  = false;
    features->descriptorBindingInlineUniformBlockUpdateAfterBind = false;
-   features->pipelineCreationCacheControl        = false;
+   features->pipelineCreationCacheControl        = true;
    features->privateData                         = true;
    features->shaderDemoteToHelperInvocation      = true;
    features->shaderTerminateInvocation           = true;
@@ -1173,7 +1175,7 @@ tu_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
       .framebufferNoAttachmentsSampleCounts = sample_counts,
       .maxColorAttachments = MAX_RTS,
       .sampledImageColorSampleCounts = sample_counts,
-      .sampledImageIntegerSampleCounts = VK_SAMPLE_COUNT_1_BIT,
+      .sampledImageIntegerSampleCounts = sample_counts,
       .sampledImageDepthSampleCounts = sample_counts,
       .sampledImageStencilSampleCounts = sample_counts,
       .storageImageSampleCounts = VK_SAMPLE_COUNT_1_BIT,
@@ -2611,7 +2613,8 @@ tu_init_sampler(struct tu_device *device,
    if (pCreateInfo->borderColor == VK_BORDER_COLOR_FLOAT_CUSTOM_EXT ||
        pCreateInfo->borderColor == VK_BORDER_COLOR_INT_CUSTOM_EXT) {
       mtx_lock(&device->mutex);
-      border_color = BITSET_FFS(device->custom_border_color);
+      border_color = BITSET_FFS(device->custom_border_color) - 1;
+      assert(border_color < TU_BORDER_COLOR_COUNT);
       BITSET_CLEAR(device->custom_border_color, border_color);
       mtx_unlock(&device->mutex);
       tu6_pack_border_color(device->global_bo->map + gb_offset(bcolor[border_color]),
