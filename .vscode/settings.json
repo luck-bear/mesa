@@ -6,5 +6,9 @@
         "titleBar.activeBackground": "#264733",
         "titleBar.activeForeground": "#F8FBFA"
     },
-    "makefile.extensionOutputFolder": "./.vscode"
+    "makefile.extensionOutputFolder": "./.vscode",
+    "editor.detectIndentation": false,
+    "editor.tabSize": 4,
+    "editor.formatOnPaste": true,
+    "editor.formatOnSave": true
 }
